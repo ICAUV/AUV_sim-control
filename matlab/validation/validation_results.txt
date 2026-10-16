@@ -1,0 +1,36 @@
+=== Parameter summary (auv1) ===
+Spheroid mass            : 22.0000 kg (target 22)
+a, b                     : 0.6233 m, 0.0907 m (L/2 = 0.550, D/2 = 0.080)
+Added mass diag(M-MRB)   : [0.8105 20.49 20.49 0.0217 1.4 1.4]
+W = 215.865 N, dB = 2.000 N
+
+=== 1. Equivalence test ===
+PASS: auv1 matches remus100 (max abs difference 0, tol 1e-12)
+
+=== 2. At rest, dB = 0, zero inputs, 60 s ===
+max |velocity| over 60 s : 0 (limit 1e-6)  ->  PASS
+max |position change|    : 0 m
+
+=== 3. At rest, dB = 2 N (rise) ===
+final w                  : -0.1128 m/s (dw/dt = -1.1e-15 m/s2)
+steady rise speed        : 0.1128 m/s (from last 10 s of depth)
+final pitch, roll        : -0.0000 deg, 0.0000 deg
+hand calc, Cd = 1.2      : 0.1359 m/s
+balance with crossFlowDrag: 0.1690 m/s
+simulated / hand (Cd=1.2) : 0.83 ; simulated / crossFlowDrag : 0.67
+
+=== 4. Free decay, dB = 0, zero inputs ===
+linearised modes at rest (|lambda| ascending):
+  -0.050 (real)
+  -0.050 (real)
+  -0.050 (real)
+  -1.000 (real)
+  -0.939+0.701i  wn 1.171 rad/s, zeta 0.801, T 8.96 s
+  -2.035+6.308i  wn 6.628 rad/s, zeta 0.307, T 1.00 s
+pitch: final -2.705e-06 deg, max |pitch rate| at end 2.4e-09, 2% settling time 3.4 s  ->  PASS
+  measured: no repeated overshoot, motion is (near) critically/over-damped
+roll: final -1.627e-06 deg, max |roll rate| at end 1.4e-09, 2% settling time 1.7 s  ->  PASS
+  measured: period 1.00 s, damping ratio 0.308 (log decrement, 4 same-sign peaks)
+
+=== 5. SIMauv1(1, 1) end to end ===
+completed without error in 11.6 s; 4 figures, 588021 plotted points, 0 non-finite  ->  PASS

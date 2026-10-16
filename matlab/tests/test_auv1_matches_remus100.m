@@ -25,10 +25,11 @@ assert(strcmp(fileparts(which('remus100')), refDir), 'remus100 not resolved to t
 
 rng(1);
 maxErr = 0;
-P = auv1Params(); % Explicit parameters, as passed by SIMauv1
+P = auv1Params('remus100'); % Explicit REMUS 100 parameter set; auv1 defaults to AUV1
 
-% Mass matrix from the empty call
-[~,~,M_auv] = auv1();
+% Mass matrix from the zero-state call (what the empty call returns, but with
+% the REMUS 100 parameter set)
+[~,~,M_auv] = auv1(zeros(12,1), zeros(3,1), 0, 0, 0, P.model);
 [~,~,M_ref] = remus100();
 assert(isequal(size(M_auv), [6 6]), 'M has wrong size');
 assert(all(isfinite(M_auv(:))), 'M contains non-finite values');
@@ -49,18 +50,14 @@ for k = 1:nSamples
         x = states{s};
 
         % No currents
-        [xdot_a, U_a] = auv1(x, ui);
+        [xdot_a, U_a] = auv1(x, ui, 0, 0, 0, P.model);
         [xdot_r, U_r] = remus100(x, ui);
         maxErr = max(maxErr, checkMatch(xdot_a, xdot_r, U_a, U_r, tol, k, s, 'no currents'));
 
         % 3-D currents
-        [xdot_a, U_a] = auv1(x, ui, Vc, betaVc, w_c);
+        [xdot_a, U_a] = auv1(x, ui, Vc, betaVc, w_c, P.model);
         [xdot_r, U_r] = remus100(x, ui, Vc, betaVc, w_c);
         maxErr = max(maxErr, checkMatch(xdot_a, xdot_r, U_a, U_r, tol, k, s, 'currents'));
-
-        % 3-D currents, explicit model parameters
-        [xdot_a, U_a] = auv1(x, ui, Vc, betaVc, w_c, P.model);
-        maxErr = max(maxErr, checkMatch(xdot_a, xdot_r, U_a, U_r, tol, k, s, 'currents, P.model'));
     end
 end
 

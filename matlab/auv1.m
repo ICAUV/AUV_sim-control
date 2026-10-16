@@ -1,11 +1,11 @@
 function [xdot,U,M] = auv1(x,ui,Vc,betaVc,w_c,model)
 
-% The length of the AUV1 is **TBD** m, the cylinder diameter is **TBD** cm  
-% and the mass of the vehicle is **TBD** kg. 
-% 
-% ""The maximum speed of 2.5 m/s is 
-% obtained when the propeller runs at 1525 rpm in zero currents.""
-% 
+% The length of the AUV1 is 1.1 m, the cylinder diameter is 16 cm and the
+% mass of the vehicle (including the water in the free-flooded sections) is
+% 22 kg. The propeller is still the REMUS 100 one (placeholder), so the
+% maximum speed of 2.5 m/s at 1525 rpm in zero currents does not apply to
+% AUV1. All values are documented in auv1Params.m.
+%
 % The function returns the time derivative xdot of the state vector: 
 %
 %   x = [ u v w p q r x y z phi theta psi ]', alternatively 
@@ -191,7 +191,7 @@ CA(6,2) = 0; CA(2,6) = 0;
 
 M = MRB + MA;
 C = CRB + CA;
-m = MRB(1,1); W = m * g_mu; B = W;
+m = MRB(1,1); W = m * g_mu; B = W + model.dB; % Net buoyancy dB (N)
 
 % Dissipative forces and moments
 D = Dmtrx([T1 T2 T6],[zeta4 zeta5],MRB,MA,[W r_bG' r_bB']);
