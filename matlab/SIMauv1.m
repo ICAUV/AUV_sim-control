@@ -1,4 +1,4 @@
-function SIMauv1(ControlFlag, KinematicsFlag)
+function simOut = SIMauv1(ControlFlag, KinematicsFlag)
 % This script simulates the Remus 100 Autonomous Underwater Vehicle (AUV)
 % under depth and heading control while exposed to ocean currents. It supports
 % both Euler angle and unit quaternion kinematics representations and features
@@ -13,6 +13,8 @@ function SIMauv1(ControlFlag, KinematicsFlag)
 %   SIMauv1(ControlFlag, KinematicsFlag) : ControlFlag = 1-4 (see dialog),
 %                                          KinematicsFlag = 1 (Euler angles)
 %                                          or 2 (unit quaternions)
+%   simOut = SIMauv1(...)                : Also return the logged results as a
+%                                          struct, e.g. for auv1Visualiser(simOut)
 %
 % Dependencies:
 %   auv1.m                - Dynamics of the AUV1 vehicle
@@ -250,7 +252,7 @@ for i = 1:nTimeSteps
             delta_r = sat(delta_r, delta_max);
 
             % 2-D ALOS guidance law
-            [psi_ref,~,~,k_active] = ALOSpsi(xn,yn,Delta_h,gamma_h,h,R_switch,wpt);
+            [psi_ref,y_e,beta_c_hat,k_active] = ALOSpsi(xn,yn,Delta_h,gamma_h,h,R_switch,wpt);
             z_ref = wpt.pos.z(k_active); % Use z-coordinate as depth reference
 
             % Gradient-based depth command (down position)
@@ -269,6 +271,9 @@ for i = 1:nTimeSteps
 
             % Propagate reference model for desired depth (k+1)
             [z_d,zdot_d,a_d] = refModel(z_d,zdot_d,a_d,z_ref,w_max,zeta_d_z,wn_d_z,h,0);
+
+            % Store ALOS data in table (no vertical-track error in 2.5-D)
+            alosData(i,:) = [y_e NaN NaN beta_c_hat];
 
         otherwise % Control flag 4 (3-D ALOS path-following)
             % Heading autopilot using the tail rudder (integral SMC)
@@ -556,6 +561,32 @@ if ControlFlag == 4 % 3-D ALOS
     set(findall(gcf,'type','text'),'FontSize',12)
     set(findall(gcf,'type','legend'),'FontSize',legendSize)
     view(-25, 30);  % view(AZ,EL)
+end
+
+% ==============================================================================
+% SIMULATION OUTPUT (see auv1Visualiser.m)
+% ==============================================================================
+if nargout > 0
+    simOut.t = t(:);                    % Time (s)
+    simOut.h = h;                       % Sampling time (s)
+    simOut.ControlFlag = ControlFlag;
+    simOut.KinematicsFlag = KinematicsFlag;
+    simOut.eta = eta;                   % [x y z phi theta psi], NED (m, rad)
+    simOut.nu = nu;                     % [u v w p q r] (m/s, rad/s)
+    simOut.ui = ui;                     % [delta_r delta_s n] applied (rad, rad, RPM)
+    simOut.ref.z_d = simData(:,1);      % Desired depth (m), ControlFlag 1-3
+    simOut.ref.theta_d = theta_d;       % Desired pitch angle (rad)
+    simOut.ref.psi_d = psi_d;           % Desired yaw angle (rad)
+    simOut.ref.r_d = r_d;               % Desired yaw rate (rad/s)
+    simOut.current.Vc = Vc;             % Horizontal current speed (m/s)
+    simOut.current.betaVc = betaVc;     % Horizontal current direction (rad)
+    simOut.current.wc = wc;             % Vertical current speed (m/s)
+    simOut.alos.y_e = y_e;              % Cross-track error (m), ControlFlag 3-4
+    simOut.alos.z_e = z_e;              % Vertical-track error (m), ControlFlag 4
+    simOut.alos.alpha_c_hat = alpha_c_hat;
+    simOut.alos.beta_c_hat = beta_c_hat;
+    simOut.wpt = wpt;                   % Waypoints (m), ControlFlag 3-4
+    simOut.P = P;                       % Model, control and guidance parameters
 end
 
 end % SIMauv1
