@@ -1,4 +1,4 @@
-function [xdot,U,M] = auv1(x,ui,Vc,betaVc,w_c)
+function [xdot,U,M] = auv1(x,ui,Vc,betaVc,w_c,model)
 
 % The length of the AUV1 is **TBD** m, the cylinder diameter is **TBD** cm  
 % and the mass of the vehicle is **TBD** kg. 
@@ -44,14 +44,19 @@ function [xdot,U,M] = auv1(x,ui,Vc,betaVc,w_c)
 % The arguments Vc (m/s), betaVc (rad), w_c (m/s) are optional arguments for 
 % ocean currents
 %
-%    v_c = [ Vc * cos(betaVc - psi), Vc * sin( betaVc - psi), w_c ]  
-% 
-% Example usage: 
-%   [~,~,M] = remus100()                            : Return the 6x6 mass matrix M
-%   [xdot,U] = remus100(x,ui,Vc,betaVc,alphaVc,w_c) : 3-D ocean currents
-%   [xdot,U] = remus100(x,ui,Vc,betaVc,alphaVc)     : 2-D ocean currents
-%   [xdot,U] = remus100(x,ui)                       : No ocean currents
-%   xdot = remus100(x,ui)                           : No ocean currents
+%    v_c = [ Vc * cos(betaVc - psi), Vc * sin( betaVc - psi), w_c ]
+%
+% The optional argument model is the struct P.model from auv1Params.m. If it
+% is omitted, the default parameters are loaded on every call, so pass it
+% explicitly in simulation loops.
+%
+% Example usage:
+%   [~,~,M] = auv1()                             : Return the 6x6 mass matrix M
+%   P = auv1Params();
+%   [xdot,U] = auv1(x,ui,Vc,betaVc,w_c,P.model)  : 3-D ocean currents
+%   [xdot,U] = auv1(x,ui,Vc,betaVc,w_c)          : 3-D ocean currents, default model
+%   [xdot,U] = auv1(x,ui,Vc,betaVc)              : 2-D ocean currents, default model
+%   [xdot,U] = auv1(x,ui)                        : No ocean currents, default model
 %
 % Author:    Jaime López Ruiz, Léo Sutherby, Thor I. Fossen
 % 
@@ -86,23 +91,25 @@ function [xdot,U,M] = auv1(x,ui,Vc,betaVc,w_c)
 %   T. I. Fossen (2027). Handbook of Marine Craft Hydrodynamics and
 %       Motion Control. 3rd. Edition, Wiley. URL: www.fossen.biz/wiley   
 
-if nargin == 0  % [~,~,M] = remus100()
+if nargin == 0  % [~,~,M] = auv1()
     x = zeros(12,1); ui = zeros(3,1); Vc = 0; betaVc = 0; w_c = 0;
 end
 
 if (nargin == 2), Vc = 0; betaVc = 0; w_c = 0; end % No ocean currents
 if (nargin == 4), w_c = 0; end % No vertical ocean currents
+if (nargin < 6 || isempty(model)) % Default model parameters
+    P = auv1Params();
+    model = P.model;
+end
 
 if (length(ui) ~= 3),error('u-vector must have dimension 3!'); end
 if (length(x) ~= 12 && length(x) ~= 13)
     error('x-vector must have dimension 12 or 13'); 
 end
 
-% Constants
-mu = deg2rad(63.446827); % Latitude for Trondheim, Norway (deg)
-g_mu = gravity(mu);      % Gravity vector (m/s2)
-constant = mssConstants();
-rho = constant.rho_water;
+% Constants (auv1Params.m)
+g_mu = model.g_mu;       % Gravity (m/s2)
+rho = model.rho;         % Density of water (kg/m3)
 
 % 6x1 velocity vector, yaw angle and control inputs
 nu = x(1:6); 
@@ -113,13 +120,9 @@ else % Convert unit quaternion to yaw angle
 end
 
 % Amplitude saturation of the control signals
-delta_max = deg2rad(20); % Maximum rudder and stern angles (rad)
-n_max = 1525;            % Maximum propeller speed (RPM)
-
-% Amplitude saturation of the control signals
-delta_r = sat(ui(1), delta_max);    % Saturated tail rudder (rad)
-delta_s = sat(ui(2), delta_max);    % Saturated Stern plane (rad)
-n_p = sat(ui(3),n_max) / 60;        % Saturated propeller speed (rps)
+delta_r = sat(ui(1), model.delta_max);  % Saturated tail rudder (rad)
+delta_s = sat(ui(2), model.delta_max);  % Saturated Stern plane (rad)
+n_p = sat(ui(3), model.n_max) / 60;     % Saturated propeller speed (rps)
 
 % Ocean currents expressed in BODY
 u_c = Vc * cos( betaVc - psi );                               
@@ -134,39 +137,20 @@ alpha = atan2( nu_r(3), nu_r(1) );                % Angle of attack (rad)
 U_r = sqrt( nu_r(1)^2 + nu_r(2)^2 + nu_r(3)^2 );  % Relative speed (m/s)
 U  = sqrt( nu(1)^2 + nu(2)^2 + nu(3)^2 );         % Speed (m/s)
 
-% AUV model parameters; Fossen (2027, Chapter 8) and Allen et al. (2000)
-L_auv = 1.6;             % AUV length (m)
-D_auv = 0.19;            % AUV diamater (m)
-S = 0.7 * L_auv * D_auv; % Planform area S = 70% of rectangle L_auv * D_auv
-a = 1.0096 * L_auv/2;    % Scaled spheroid semi-axes a and b to obtain m = 31.9 kg
-b = 1.0096 * D_auv/2;                   
-r44 = 0.3;               % Added moment of inertia in roll: A44 = r44 * Ix
-r_bG = [ 0 0 0.02 ]';    % CG w.r.t. to the CO
-r_bB = [ 0 0 0 ]';       % CB w.r.t. to the CO
-
-% Parasitic drag coefficient CD_0, i.e. zero lift and alpha = 0
-% F_drag = 0.5 * rho * Cd * (pi * b^2)   
-% F_drag = 0.5 * rho * CD_0 * S
-Cd = 0.42;                              % From Allen et al. (2000)
-CD_0 = Cd * pi * b^2 / S;
+% AUV model parameters (auv1Params.m); Fossen (2027, Chapter 8) and
+% Allen et al. (2000)
+L_auv = model.L_auv;  D_auv = model.D_auv;  S = model.S;
+a = model.a;  b = model.b;  r44 = model.r44;
+r_bG = model.r_bG;  r_bB = model.r_bB;
+CD_0 = model.CD_0;                       % Parasitic drag coefficient
 
 % Propeller coeffs. KT and KQ are computed as a function of advance no.
-% Ja = Va/(n*D_prop) where Va = (1-w)*U_r = 0.944 * U_r; Allen et al. (2000)
-D_prop = 0.14;   % Propeller diameter corresponding to 5.5 inches
-t_prop = 0.1;    % Thrust deduction number
-Va = 0.944 * U_r;  % Advance speed (m/s)
+% Ja = Va/(n*D_prop) where Va = (1-w)*U_r; Allen et al. (2000)
+D_prop = model.D_prop;  t_prop = model.t_prop;  Ja_max = model.Ja_max;
+KT_0 = model.KT_0;  KQ_0 = model.KQ_0;
+KT_max = model.KT_max;  KQ_max = model.KQ_max;
+Va = model.Va_ratio * U_r;               % Advance speed (m/s)
 
-% Ja_max = 0.944 * 2.5 / (0.14 * 1525/60) = 0.6632
-Ja_max = 0.6632;
-        
-% Single-screw propeller with 3 blades and blade-area ratio = 0.718.    
-% >> [KT_0, KQ_0] = wageningen(0,1,0.718,3)
-KT_0 = 0.4566;
-KQ_0 = 0.0700;
-% >> [KT_max, KQ_max] = wageningen(0.6632,1,0.718,3) 
-KT_max = 0.1798;
-KQ_max = 0.0312;
-        
 % Propeller thrust and propeller-induced roll moment
 % Linear approximations for positive Ja values
 % KT ~= KT_0 + (KT_max-KT_0)/Ja_max * Ja   
@@ -183,24 +167,13 @@ else
     K_prop = rho * D_prop^5 * KQ_0 * abs(n_p) * n_p;            
 end            
 
-S_fin = 0.00665;         % Fin area
-
-% Tail rudder
-CL_delta_r = 0.5;        % Rudder lift coefficient (-)
-A_r = 2 * S_fin;         % Rudder area (m2)
-x_r = -a;                % Rudder x-position (m)
-
-% Stern plane (double)
-CL_delta_s = 0.7;        % Stern-plane lift coefficient (-)
-A_s = 2 * S_fin;         % Stern-plane area (m2)
-x_s = -a;                % Stern-plane z-position (m)
+% Tail rudder and stern plane (double)
+CL_delta_r = model.CL_delta_r;  A_r = model.A_r;  x_r = model.x_r;
+CL_delta_s = model.CL_delta_s;  A_s = model.A_s;  x_s = model.x_s;
 
 % Low-speed linear damping matrix parameters
-T1 = 20;                 % Time constant in surge (s)
-T2 = 20;                 % Time constant in sway (s)
-zeta4 = 0.3;             % Relative damping ratio in roll
-zeta5 = 0.8;             % Relative damping ratio in pitch
-T6 = 1;                  % Time constant in yaw (s)
+T1 = model.T1;  T2 = model.T2;  T6 = model.T6;
+zeta4 = model.zeta4;  zeta5 = model.zeta5;
 
 % Rigid-body mass and hydrodynamic added mass
 [MRB,CRB] = spheroid(a,b,nu(4:6),r_bG);
