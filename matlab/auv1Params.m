@@ -1,51 +1,162 @@
-function P = auv1Params()
-% P = auv1Params() returns the model, control system and guidance parameters
-% of the AUV1 simulator as a struct:
+function P = auv1Params(vehicle)
+% P = auv1Params(vehicle) returns the model, control system and guidance
+% parameters of the simulator as a struct:
 %
 %   P.model     - Vehicle model and actuator parameters (passed to auv1.m)
 %   P.ctrl      - Depth, pitch and heading autopilot parameters
 %   P.guidance  - ALOS path-following parameters
+%
+% vehicle selects the model parameter set:
+%   'auv1'      - AUV1 hull, mass, buoyancy and fins (default). The propeller
+%                 is still the REMUS 100 one (pass B replaces it).
+%   'remus100'  - Original MSS REMUS 100 values, used as the reference in
+%                 tests/test_auv1_matches_remus100.m.
 %
 % Field names match the variable names used in auv1.m and SIMauv1.m.
 % Derived quantities (planform area, spheroid semi-axes, parasitic drag
 % coefficient, fin areas and pitch PID gains) are computed here, so changing
 % a primary parameter updates everything that depends on it.
 %
+% Every AUV1 value is documented as: unit | source | uncertainty. Values
+% without a measurement are marked ESTIMATE. The history of changes from the
+% REMUS 100 values is kept in PARAMS_CHANGELOG.md.
+%
 % Example usage:
 %   P = auv1Params();
 %   xdot = auv1(x, ui, Vc, betaVc, w_c, P.model);
 %   x = rk4(@auv1, h, x, ui, Vc, betaVc, w_c, P.model);
 
+if nargin < 1 || isempty(vehicle), vehicle = 'auv1'; end
+
+constant = mssConstants();
+rho_mss = constant.rho_water;      % Density used inside the MSS helpers (kg/m3)
+
 % ==============================================================================
 % MODEL PARAMETERS (auv1.m)
 % ==============================================================================
-% Constants
-mu = deg2rad(63.446827);           % Latitude for Trondheim, Norway (rad)
-model.g_mu = gravity(mu);          % Gravity (m/s2)
-constant = mssConstants();
-model.rho = constant.rho_water;    % Density of water (kg/m3)
+switch lower(vehicle)
 
-% Actuator and operating limits
-model.delta_max = deg2rad(20);     % Maximum rudder and stern angles (rad)
-model.n_max = 1525;                % Maximum propeller speed (RPM)
-model.n_rate = 0.1;                % Propeller rate limit (RPM per update)
-model.z_max = 100;                 % Maximum depth (m)
+    case 'auv1'
+        % --- Environment --------------------------------------------------
+        % Gravity latitude (rad) | London, 51.5 deg N | negligible
+        model.g_mu = gravity(deg2rad(51.5));
 
-% Hull; Fossen (2027, Chapter 8) and Allen et al. (2000)
-model.L_auv = 1.6;                 % AUV length (m)
-model.D_auv = 0.19;                % AUV diameter (m)
-model.S = 0.7 * model.L_auv * model.D_auv; % Planform area S = 70% of L_auv * D_auv
-model.a = 1.0096 * model.L_auv/2;  % Scaled spheroid semi-axes a and b to obtain m = 31.9 kg
-model.b = 1.0096 * model.D_auv/2;
-model.r44 = 0.3;                   % Added moment of inertia in roll: A44 = r44 * Ix
-model.r_bG = [ 0 0 0.02 ]';        % CG w.r.t. to the CO
-model.r_bB = [ 0 0 0 ]';           % CB w.r.t. to the CO
+        % Water density (kg/m3) | fresh water, pool tests | 996-1000 for
+        % 10-30 deg C. KNOWN GAP: the MSS helpers (spheroid, imlay61,
+        % crossFlowDrag) use rho_water = 1025 internally, so the rigid-body
+        % mass, added mass and hull drag are ~2.5% off relative to fresh
+        % water. Only the propeller and fin forces in auv1.m use this value.
+        model.rho = 1000;
 
-% Parasitic drag coefficient CD_0, i.e. zero lift and alpha = 0
+        % --- Hull ---------------------------------------------------------
+        % Length (m) | orientation deck 13 Oct 2026, slide 4; current CAD
+        % spine rod 1030 mm | +-0.05
+        model.L_auv = 1.1;
+
+        % Diameter (m) | orientation deck 13 Oct 2026, slide 4 | +-0.01
+        model.D_auv = 0.16;
+
+        % Mass moving with the hull (kg) | ESTIMATE, +-20%. Includes the water
+        % inside the free-flooded sections (~ rho*pi*(D/2)^2*L). The deck
+        % gives ~20 kg dry.
+        m_target = 22;
+
+        % Spheroid semi-axes (m) | derived from m_target. spheroid() computes
+        % m = 4/3*pi*rho_mss*a*b^2, so the hull spheroid is scaled by k to
+        % return m_target. a, b are therefore slightly larger than L/2, D/2.
+        k = (m_target / (rho_mss * 4/3 * pi * (model.L_auv/2) * (model.D_auv/2)^2))^(1/3);
+        model.a = k * model.L_auv/2;
+        model.b = k * model.D_auv/2;
+
+        % Centre of gravity w.r.t. the body origin CO (m) | ESTIMATE, +-0.01
+        % in z, until the TG2 tilt test
+        model.r_bG = [ 0 0 0.02 ]';
+
+        % Centre of buoyancy w.r.t. the body origin CO (m) | ESTIMATE,
+        % body origin placed at the CB
+        model.r_bB = [ 0 0 0 ]';
+
+        % Net buoyancy B - W (N) | ESTIMATE, slightly positive as required by
+        % TG2; to be measured at the float test
+        model.dB = 2;
+
+        % --- Fins ---------------------------------------------------------
+        % Area per fin (m2) | TG5 brief, real blade | uncertainty not stated
+        model.S_fin = 0.0096;
+
+        % Fin x-position from mid-length, rudder and stern plane (m) |
+        % ESTIMATE, +-0.05, until the hinge is measured
+        model.x_r = -0.45;
+        model.x_s = -0.45;
+
+        % Maximum rudder and stern-plane angle (rad) | 25 deg,
+        % auv1-sim/config/vehicle.json | unverified
+        model.delta_max = deg2rad(25);
+
+    case 'remus100'
+        % Original MSS REMUS 100 values; Fossen (2027, Chapter 8) and
+        % Allen et al. (2000)
+        mu = deg2rad(63.446827);       % Latitude for Trondheim, Norway (rad)
+        model.g_mu = gravity(mu);      % Gravity (m/s2)
+        model.rho = rho_mss;           % Density of water (kg/m3)
+
+        model.L_auv = 1.6;             % AUV length (m)
+        model.D_auv = 0.19;            % AUV diameter (m)
+        model.a = 1.0096 * model.L_auv/2;  % Scaled spheroid semi-axes a and b to obtain m = 31.9 kg
+        model.b = 1.0096 * model.D_auv/2;
+        model.r_bG = [ 0 0 0.02 ]';    % CG w.r.t. to the CO
+        model.r_bB = [ 0 0 0 ]';       % CB w.r.t. to the CO
+        model.dB = 0;                  % Neutrally buoyant, B = W (N)
+
+        model.S_fin = 0.00665;         % Fin area (m2)
+        model.x_r = -model.a;          % Rudder x-position (m)
+        model.x_s = -model.a;          % Stern-plane x-position (m)
+
+        model.delta_max = deg2rad(20); % Maximum rudder and stern angles (rad)
+
+    otherwise
+        error('auv1Params:vehicle', ...
+            'Unknown vehicle ''%s''. Use ''auv1'' or ''remus100''.', vehicle);
+end
+
+% Planform area S = 70% of L_auv * D_auv (m2) | derived
+model.S = 0.7 * model.L_auv * model.D_auv;
+
+% Parasitic drag coefficient CD_0, i.e. zero lift and alpha = 0 | derived
 % F_drag = 0.5 * rho * Cd * (pi * b^2)
 % F_drag = 0.5 * rho * CD_0 * S
-model.Cd = 0.42;                   % From Allen et al. (2000)
+% Cd (-) | ESTIMATE (REMUS value), from Allen et al. (2000)
+model.Cd = 0.42;
 model.CD_0 = model.Cd * pi * model.b^2 / model.S;
+
+% Added moment of inertia in roll: A44 = r44 * Ix (-) | ESTIMATE (REMUS value)
+model.r44 = 0.3;
+
+% Tail rudder
+% Lift coefficient (-) | ESTIMATE (REMUS value), REMUS calibrated effective value
+model.CL_delta_r = 0.5;
+model.A_r = 2 * model.S_fin;       % Rudder area (m2) | derived from S_fin
+
+% Stern plane (double)
+% Lift coefficient (-) | ESTIMATE (REMUS value), REMUS calibrated effective value
+model.CL_delta_s = 0.7;
+model.A_s = 2 * model.S_fin;       % Stern-plane area (m2) | derived from S_fin
+
+% Low-speed linear damping matrix parameters | ESTIMATE (REMUS value)
+model.T1 = 20;                     % Time constant in surge (s)
+model.T2 = 20;                     % Time constant in sway (s)
+model.zeta4 = 0.3;                 % Relative damping ratio in roll
+model.zeta5 = 0.8;                 % Relative damping ratio in pitch
+model.T6 = 1;                      % Time constant in yaw (s)
+
+% Operating limits | ESTIMATE (REMUS value)
+model.z_max = 100;                 % Maximum depth (m)
+
+% ------------------------------------------------------------------------------
+% REMUS PLACEHOLDER: replaced by T500 in pass B (both parameter sets)
+% ------------------------------------------------------------------------------
+model.n_max = 1525;                % Maximum propeller speed (RPM)
+model.n_rate = 0.1;                % Propeller rate limit (RPM per update)
 
 % Propeller coeffs. KT and KQ are computed as a function of advance no.
 % Ja = Va/(n*D_prop) where Va = (1-w)*U_r = 0.944 * U_r; Allen et al. (2000)
@@ -64,24 +175,13 @@ model.KQ_0 = 0.0700;
 model.KT_max = 0.1798;
 model.KQ_max = 0.0312;
 
-model.S_fin = 0.00665;             % Fin area (m2)
-
-% Tail rudder
-model.CL_delta_r = 0.5;            % Rudder lift coefficient (-)
-model.A_r = 2 * model.S_fin;       % Rudder area (m2)
-model.x_r = -model.a;              % Rudder x-position (m)
-
-% Stern plane (double)
-model.CL_delta_s = 0.7;            % Stern-plane lift coefficient (-)
-model.A_s = 2 * model.S_fin;       % Stern-plane area (m2)
-model.x_s = -model.a;              % Stern-plane x-position (m)
-
-% Low-speed linear damping matrix parameters
-model.T1 = 20;                     % Time constant in surge (s)
-model.T2 = 20;                     % Time constant in sway (s)
-model.zeta4 = 0.3;                 % Relative damping ratio in roll
-model.zeta5 = 0.8;                 % Relative damping ratio in pitch
-model.T6 = 1;                      % Time constant in yaw (s)
+% The AUV1 hull spheroid must reproduce the target mass (spheroid() uses rho_mss)
+if strcmpi(vehicle, 'auv1')
+    MRB = spheroid(model.a, model.b, zeros(3,1), model.r_bG);
+    assert(abs(MRB(1,1) - m_target) / m_target < 1e-3, ...
+        'auv1Params:mass', 'Spheroid mass %.3f kg differs from m_target %.3f kg', ...
+        MRB(1,1), m_target);
+end
 
 P.model = model;
 
