@@ -1,12 +1,13 @@
 function fig = auv1Visualiser(simOut)
-% auv1Visualiser(simOut) opens an animated 3-D replay of an SIMauv1 run: the
-% travelled path, a 3-D model of the vehicle with moving rudders and stern
-% planes, the waypoints and desired path (ControlFlag 3-4), a HUD readout and
-% linked time plots.
+% auv1Visualiser(simOut) opens a replay of an SIMauv1 run: a 3-D view of the
+% vehicle, with moving rudders and stern planes, on its path, the waypoints
+% and active leg (ControlFlag 3-4), a readout of the state and time plots.
+%
+% SIMauv1 opens it at the end of every run. To replay a run again later:
 %
 % Usage:
 %   simOut = SIMauv1(4, 2);                 % Run the simulator, keep the results
-%   auv1Visualiser(simOut)                  % Replay them
+%   auv1Visualiser(simOut)                  % Replay them again
 %
 %   save('run.mat', '-struct', 'simOut');   % Or save a run ...
 %   auv1Visualiser('run.mat')               % ... and replay it later
@@ -14,16 +15,26 @@ function fig = auv1Visualiser(simOut)
 %   fig = auv1Visualiser(...)               % Also return the figure handle
 %
 % Controls:
-%   Play/Pause, step buttons and the time slider. Keyboard: Space, Left/Right
-%   (1 s, Shift: 10 s), Home/End. Click a time plot to jump to that time.
+%   Play/Pause, -1 s/+1 s and the time slider (dragging it pauses). Click a
+%   time plot to jump to that time. Keys, once the 3-D view or a plot has
+%   been clicked: Space, Left/Right (1 s, Shift: 10 s), Home/End.
+%   Speed  Replay speed as a multiple of real time. When drawing cannot keep
+%          up, samples are skipped, so the replay never runs slow.
 %   View   Overview - whole mission, drag to rotate, scroll to zoom
 %          Follow   - chase camera off the vehicle's starboard quarter
 %          Top      - North-East plane seen from above
 %   Scale  Vehicle size multiplier, so the 1.6 m hull is visible over km.
 %          In Follow view it also sets the camera distance; 1 = true size.
 %   Vert.  Vertical exaggeration of depth. The vehicle keeps its shape and is
-%          tilted to line up with the exaggerated path; the HUD shows the
+%          tilted to line up with the exaggerated path; the readout shows the
 %          true angles.
+%
+% What is shown is the logged data. Each frame is one logged sample k, never
+% interpolated, and every part of the window shows that sample: vehicle,
+% trail, readout, plot cursors and time slider. The plots draw the logged
+% arrays at full resolution. The active waypoint is replayed from the logged
+% positions with the switching rule of ALOSpsi (ControlFlag 3) or ALOS3D (4),
+% and is only shown if the replay reproduces the logged tracking errors.
 %
 % simOut fields (see the end of SIMauv1.m). Only t and eta are required:
 %   t, eta, nu, ui, ref.{z_d,theta_d,psi_d}, current.{Vc,betaVc},
@@ -32,6 +43,7 @@ function fig = auv1Visualiser(simOut)
 % Plot frame: NED (x = North, y = East, z = Down). The y- and z-axes are
 % reversed, which together is a rotation, so the scene is not mirrored.
 %
+% Tests: tests/test_auv1Visualiser.m
 % Dependencies: Rzyx.m, ssa.m and auv1Params.m (run startup_auv1 first)
 
 if exist('Rzyx', 'file') ~= 2 || exist('ssa', 'file') ~= 2
@@ -45,15 +57,18 @@ pos = eta(:,1:3);                   % NED positions (m)
 L = d.model.L_auv;
 deltaMax = d.model.delta_max;
 U = sqrt(sum(d.nu(:,1:3).^2, 2));   % Speed (m/s)
+hasTrack = any(isfinite(d.y_e));    % Cross-track error logged (ControlFlag 3-4)
+hasVert = any(isfinite(d.z_e));     % Vertical-track error logged (ControlFlag 4)
 
 % ==============================================================================
 % WAYPOINTS AND SCENE EXTENT
 % ==============================================================================
 hasPath = ~isempty(d.wpt);
+kAct = [];                          % Active waypoint per sample, if verified
 if hasPath
     W = [d.wpt.pos.x(:) d.wpt.pos.y(:) d.wpt.pos.z(:)]; % NED (m)
     nW = size(W, 1);
-    kAct = activeWaypoints(pos, W, d.R_switch, d.ControlFlag);
+    kAct = replayWaypoints(pos, W, d.R_switch, d.ControlFlag, d.y_e, d.z_e);
 end
 
 pts = pos;
@@ -82,217 +97,228 @@ speed = speedOptions(iSpeed);
 viewNames = {'Overview', 'Follow', 'Top'};
 viewMode = 'Overview';
 
-% Playback state
-k = 1;                 % Current sample
+% The trail is drawn through every trailStride-th sample, and always ends
+% at the current one. At 1 s or less apart the chords are within a few cm of
+% the logged path, and drawing stays fast on long runs.
+trailStride = max(1, min(round(1 / mean(diff(t))), ceil(N / 3000)));
+
+% Playback state. The playback clock is t = clock0 + speed * toc(wall0).
+k = 1;                 % Current sample, the only thing showFrame draws
 playing = false;
-tSim0 = t(1);          % Sim time and wall clock at the last (re)start
+clock0 = t(1);
 wall0 = tic;
 
 % ==============================================================================
-% FIGURE AND 3-D SCENE
+% WINDOW LAYOUT
 % ==============================================================================
-fig = figure('Name', ['AUV1 replay - ' d.modeName], 'NumberTitle', 'off', ...
-    'Color', 'w', 'Units', 'normalized', 'Position', [0.05 0.07 0.9 0.85], ...
-    'KeyPressFcn', @onKey, 'DeleteFcn', @onDelete);
+mono = get(groot, 'FixedWidthFontName');
+ss = get(groot, 'ScreenSize');
+fig = uifigure('Name', ['AUV1 replay - ' d.modeName], 'Tag', 'auv1Visualiser', 'Color', 'w', ...
+    'Position', [ss(1:2) + [0.05 0.07] .* ss(3:4), [0.9 0.85] .* ss(3:4)], ...
+    'KeyPressFcn', @onKey);
+main = uigridlayout(fig, [2 2], 'RowHeight', {'1x', 'fit'}, ...
+    'ColumnWidth', {'2.2x', '1x'}, 'BackgroundColor', 'w');
+side = uigridlayout(main, [4 1], 'RowHeight', {'fit', '1x', '1x', '1x'}, ...
+    'Padding', 0, 'BackgroundColor', 'w');
+side.Layout.Row = 1;  side.Layout.Column = 2;
+controls = uigridlayout(main, [2 1], 'RowHeight', {'fit', 'fit'}, ...
+    'Padding', 0, 'BackgroundColor', 'w');
+controls.Layout.Row = 2;  controls.Layout.Column = [1 2];
 
+% ==============================================================================
+% 3-D SCENE
+% ==============================================================================
 % The panel clips the scene; a perspective camera inside the axes box
-% would otherwise draw over the HUD and time plots
-scenePanel = uipanel(fig, 'Units', 'normalized', 'Position', [0 0.13 0.68 0.87], ...
-    'BorderType', 'none', 'BackgroundColor', 'w');
-ax = axes(scenePanel, 'Position', [0.07 0.07 0.89 0.87]);
+% would otherwise draw over the readout and the time plots
+scenePanel = uipanel(main, 'BorderType', 'none', 'BackgroundColor', 'w');
+scenePanel.Layout.Row = 1;  scenePanel.Layout.Column = 1;
+ax = axes(uigridlayout(scenePanel, [1 1], 'BackgroundColor', 'w'));
 hold(ax, 'on');  grid(ax, 'on');  box(ax, 'on');
 set(ax, 'YDir', 'reverse', 'ZDir', 'reverse', 'XLim', lims(:,1)', ...
     'YLim', lims(:,2)', 'ZLim', lims(:,3)', 'DataAspectRatio', [1 1 1/ve]);
 xlabel(ax, 'North (m)');  ylabel(ax, 'East (m)');  zlabel(ax, 'Down (m)');
-title(ax, d.modeName, 'FontWeight', 'normal');
 
 % Sea surface, path shadow on the floor, full path and travelled path
 patch(ax, lims([1 2 2 1],1), lims([1 1 2 2],2), [0 0 0 0], [0.55 0.75 0.95], ...
     'FaceAlpha', 0.15, 'EdgeColor', 'none', 'FaceLighting', 'none');
-floorPath = [pos(:,1:2), repmat(zFloor, N, 1)];
-hFloorPath = plot3(ax, floorPath(:,1), floorPath(:,2), floorPath(:,3), 'Color', [0.82 0.82 0.82]);
-hPath = plot3(ax, pos(:,1), pos(:,2), pos(:,3), 'Color', [0.7 0.75 0.85]);
+plot3(ax, pos(:,1), pos(:,2), repmat(zFloor, N, 1), 'Color', [0.82 0.82 0.82]);
+plot3(ax, pos(:,1), pos(:,2), pos(:,3), 'Color', [0.7 0.75 0.85]);
 plot3(ax, pos(1,1), pos(1,2), pos(1,3), 'o', 'MarkerSize', 6, ...
     'MarkerFaceColor', [0.2 0.7 0.3], 'MarkerEdgeColor', 'w');
-hTrail = plot3(ax, pos(1,1), pos(1,2), pos(1,3), 'Color', [0 0.35 0.8], 'LineWidth', 2);
-hDrop = plot3(ax, pos([1 1],1), pos([1 1],2), [pos(1,3) zFloor], ':', 'Color', [0.4 0.4 0.4]);
-hShadow = plot3(ax, pos(1,1), pos(1,2), zFloor, 'o', 'MarkerSize', 7, ...
+hTrail = plot3(ax, NaN, NaN, NaN, 'Color', [0 0.35 0.8], 'LineWidth', 2, 'Tag', 'trail');
+hDrop = plot3(ax, [NaN NaN], [NaN NaN], [NaN NaN], ':', 'Color', [0.4 0.4 0.4]);
+hShadow = plot3(ax, NaN, NaN, zFloor, 'o', 'MarkerSize', 7, 'Tag', 'shadow', ...
     'MarkerFaceColor', [1 0.8 0.1], 'MarkerEdgeColor', [0.3 0.3 0.3]); % Finds the vehicle
 
-% Waypoints and desired path, with the active segment highlighted
-% (densified, so clipToCamera keeps the part of each leg in front of the camera)
-hActive = gobjects(0);  hDesired = gobjects(0);  Wd = zeros(0, 3);
+% Waypoints and path between them, with the active leg highlighted
+hActive = gobjects(0);
 if hasPath
-    Wd = densify(W(1:nW,:), 100);
-    hDesired = plot3(ax, Wd(:,1), Wd(:,2), Wd(:,3), '--', 'Color', [0.85 0.3 0.2]);
+    plot3(ax, W(:,1), W(:,2), W(:,3), '--', 'Color', [0.85 0.3 0.2]);
     plot3(ax, W(1:nW,1), W(1:nW,2), W(1:nW,3), 'o', 'MarkerSize', 7, ...
         'MarkerFaceColor', [0.85 0.3 0.2], 'MarkerEdgeColor', 'w');
     text(ax, W(1:nW,1), W(1:nW,2), W(1:nW,3), "  WP" + (1:nW)', ...
         'FontSize', 9, 'Color', [0.6 0.15 0.1]);
-    hActive = plot3(ax, W(1:2,1), W(1:2,2), W(1:2,3), 'Color', [1 0.55 0], ...
-        'LineWidth', 2);
+    if ~isempty(kAct)
+        hActive = plot3(ax, NaN, NaN, NaN, 'Color', [1 0.55 0], 'LineWidth', 2, ...
+            'Tag', 'activeLeg');
+    end
 end
 
 % Vehicle (body frame: x forward, y starboard, z down). hExag undoes the
-% vertical exaggeration, so hVehicle can hold a pure rotation and scale.
+% vertical exaggeration, so hVehicle can hold a pure rotation and scale
+% (an hgtransform with shear may not render correctly).
 hExag = hgtransform(ax, 'Matrix', makehgtform('scale', [1 1 1/ve]));
-hVehicle = hgtransform(hExag);
+hVehicle = hgtransform(hExag, 'Tag', 'vehicle');
 [hRudder, hStern] = buildVehicle(hVehicle, d.model);
 
 light(ax, 'Style', 'infinite', 'Position', [0.3 -0.5 -1]);  % From above
 light(ax, 'Style', 'infinite', 'Position', [-0.4 0.6 0.5], 'Color', [0.45 0.45 0.45]);
 
 % ==============================================================================
-% HUD AND LINKED TIME PLOTS
+% READOUT AND TIME PLOTS
 % ==============================================================================
-hHud = uicontrol(fig, 'Style', 'text', 'Units', 'normalized', ...
-    'Position', [0.69 0.67 0.29 0.29], 'HorizontalAlignment', 'left', ...
-    'FontName', get(groot, 'FixedWidthFontName'), 'FontSize', 10, ...
-    'BackgroundColor', [0.95 0.96 0.98]);
+hHud = uilabel(side, 'Text', '', 'FontName', mono, 'FontSize', 12, ...
+    'VerticalAlignment', 'top', 'WordWrap', 'off', ...
+    'BackgroundColor', [0.95 0.96 0.98], 'Tag', 'readout');
+hHud.Layout.Row = 1;
 
 c1 = [0 0.35 0.8];  c2 = [0.85 0.33 0.1];
 tAx = gobjects(3,1);  hCursor = gobjects(3,1);
 for i = 1:3
-    tAx(i) = axes(fig, 'Position', [0.73 0.505 - 0.165*(i-1) 0.25 0.115], ...
-        'FontSize', 8, 'Box', 'on', 'NextPlot', 'add');
+    % Padded limits keep peaks off the frame, where they would look clipped
+    tAx(i) = axes(side, 'FontSize', 9, 'Box', 'on', 'NextPlot', 'add', ...
+        'XLim', [t(1) t(end)], 'YLimitMethod', 'padded');
+    tAx(i).Layout.Row = i + 1;
     grid(tAx(i), 'on');
 end
 
-plot(tAx(1), t, eta(:,3), 'Color', c1);
+plot(tAx(1), t, eta(:,3), 'Color', c1, 'Tag', 'depth');
 if any(isfinite(d.z_d))
-    plot(tAx(1), t, d.z_d, '--', 'Color', c2);
-    title(tAx(1), 'Depth (m): true, desired (dashed)', 'FontWeight', 'normal');
+    plot(tAx(1), t, d.z_d, '--', 'Color', c2, 'Tag', 'depthRef');
+    title(tAx(1), ['Depth (m): ' coloured('true', c1) ', ' coloured('desired', c2)], ...
+        'FontWeight', 'normal');
 else
     title(tAx(1), 'Depth (m)', 'FontWeight', 'normal');
 end
 set(tAx(1), 'YDir', 'reverse');
 
-[tt, yy] = breakWraps(t, rad2deg(ssa(eta(:,6))));
-plot(tAx(2), tt, yy, 'Color', c1);
+% Yaw in [-180, 180) deg, broken at the wraps
+yaw = rad2deg(ssa(eta(:,6)));
+[tt, yy] = breakWraps(t, yaw);
+plot(tAx(2), tt, yy, 'Color', c1, 'Tag', 'yaw');
+wraps = any(abs(diff(yaw)) > 180);
 if any(isfinite(d.psi_d))
-    [tt, yy] = breakWraps(t, rad2deg(ssa(d.psi_d)));
-    plot(tAx(2), tt, yy, '--', 'Color', c2);
+    yawRef = rad2deg(ssa(d.psi_d));
+    [tt, yy] = breakWraps(t, yawRef);
+    plot(tAx(2), tt, yy, '--', 'Color', c2, 'Tag', 'yawRef');
+    wraps = wraps || any(abs(diff(yawRef)) > 180);
+    title(tAx(2), ['Yaw angle (deg): ' coloured('true', c1) ', ' coloured('desired', c2)], ...
+        'FontWeight', 'normal');
+else
+    title(tAx(2), 'Yaw angle (deg)', 'FontWeight', 'normal');
 end
-title(tAx(2), 'Yaw angle (deg): true, desired (dashed)', 'FontWeight', 'normal');
-set(tAx(2), 'YLim', [-180 180], 'YTick', -180:90:180);
+if wraps; set(tAx(2), 'YLim', [-180 180], 'YTick', -180:90:180); end
 
-if any(isfinite(d.y_e))
-    plot(tAx(3), t, d.y_e, 'Color', c1);
-    if any(isfinite(d.z_e))
-        plot(tAx(3), t, d.z_e, 'Color', c2);
-        title(tAx(3), 'Cross-track y_e (blue), vertical-track z_e (m)', 'FontWeight', 'normal');
+if hasTrack
+    plot(tAx(3), t, d.y_e, 'Color', c1, 'Tag', 'crossTrack');
+    if hasVert
+        plot(tAx(3), t, d.z_e, 'Color', c2, 'Tag', 'vertTrack');
+        title(tAx(3), ['Tracking error (m): ' coloured('cross-track y_e', c1) ...
+            ', ' coloured('vertical-track z_e', c2)], 'FontWeight', 'normal');
     else
-        title(tAx(3), 'Cross-track error y_e (m)', 'FontWeight', 'normal');
+        title(tAx(3), ['Tracking error (m): ' coloured('cross-track y_e', c1)], ...
+            'FontWeight', 'normal');
     end
 else
-    plot(tAx(3), t, rad2deg(d.ui(:,1)), 'Color', c1);
-    plot(tAx(3), t, rad2deg(d.ui(:,2)), 'Color', c2);
-    title(tAx(3), 'Rudder (blue), stern plane (deg)', 'FontWeight', 'normal');
+    plot(tAx(3), t, rad2deg(d.ui(:,1)), 'Color', c1, 'Tag', 'rudder');
+    plot(tAx(3), t, rad2deg(d.ui(:,2)), 'Color', c2, 'Tag', 'stern');
+    title(tAx(3), ['Fin angle (deg): ' coloured('rudder', c1) ', ' ...
+        coloured('stern planes', c2)], 'FontWeight', 'normal');
 end
 xlabel(tAx(3), 'Time (s)');
 
 for i = 1:3
     set(tAx(i).Children, 'HitTest', 'off');
-    hCursor(i) = xline(tAx(i), t(1), 'Color', [0.8 0.1 0.1], 'LineWidth', 1.2, ...
-        'HitTest', 'off');
+    tAx(i).YLim = tAx(i).YLim;   % Freeze, so the cursor never rescales the plot
+    hCursor(i) = plot(tAx(i), [t(1) t(1)], tAx(i).YLim, 'Color', [0.8 0.1 0.1], ...
+        'LineWidth', 1.2, 'HitTest', 'off', 'Tag', 'cursor');
     disableDefaultInteractivity(tAx(i));
     tAx(i).Toolbar.Visible = 'off';
-    tAx(i).ButtonDownFcn = @onPlotClick;
+    tAx(i).ButtonDownFcn = @(src, ~) seek(src.CurrentPoint(1,1));
 end
-linkaxes(tAx, 'x');
-xlim(tAx(1), [t(1) t(end)]);
 
 % ==============================================================================
 % CONTROLS
 % ==============================================================================
-tRange = t(end) - t(1);
-sliderStep = min([1 10] / tRange, 1);    % 1 s arrows, 10 s trough clicks
-if sliderStep(1) >= sliderStep(2); sliderStep(1) = sliderStep(2) / 10; end
-hSlider = uicontrol(fig, 'Style', 'slider', 'Units', 'normalized', ...
-    'Position', [0.05 0.085 0.93 0.03], 'Min', t(1), 'Max', t(end), ...
-    'Value', t(1), 'SliderStep', sliderStep, 'Callback', @(s,~) seekTime(s.Value));
-addlistener(hSlider, 'ContinuousValueChange', @(s,~) seekTime(s.Value));
+row = uigridlayout(controls, [1 5], 'ColumnWidth', {80, 60, 60, '1x', 'fit'}, ...
+    'Padding', 0, 'BackgroundColor', 'w');
+hPlay = uibutton(row, 'Text', 'Play', 'FontWeight', 'bold', 'Tag', 'play', ...
+    'ButtonPushedFcn', @(~,~) togglePlay());
+uibutton(row, 'Text', '-1 s', 'Tag', 'back', 'ButtonPushedFcn', @(~,~) step(-1));
+uibutton(row, 'Text', '+1 s', 'Tag', 'forward', 'ButtonPushedFcn', @(~,~) step(1));
+hSlider = uislider(row, 'Limits', [t(1) t(end)], 'Value', t(1), ...
+    'MajorTicks', [], 'MinorTicks', [], 'Tag', 'time', ...
+    'ValueChangingFcn', @onDrag, 'ValueChangedFcn', @(src, ~) seek(src.Value));
+hTime = uilabel(row, 'Text', '', 'FontName', mono, 'FontSize', 12, 'Tag', 'clock');
 
-y = 0.025;  h = 0.04;
-hPlay = uicontrol(fig, 'Style', 'pushbutton', 'String', 'Play', 'Units', 'normalized', ...
-    'Position', [0.05 y 0.06 h], 'FontWeight', 'bold', 'Callback', @(~,~) togglePlay());
-uicontrol(fig, 'Style', 'pushbutton', 'String', '<', 'Units', 'normalized', ...
-    'Position', [0.115 y 0.03 h], 'Callback', @(~,~) seekTime(t(k) - 1));
-uicontrol(fig, 'Style', 'pushbutton', 'String', '>', 'Units', 'normalized', ...
-    'Position', [0.15 y 0.03 h], 'Callback', @(~,~) seekTime(t(k) + 1));
-hTime = uicontrol(fig, 'Style', 'text', 'Units', 'normalized', ...
-    'Position', [0.19 y 0.15 h*0.7], 'HorizontalAlignment', 'left', ...
-    'BackgroundColor', 'w', 'FontSize', 10);
-
-addLabel('Speed', [0.35 y 0.04 h*0.7]);
-uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', ...
-    'Position', [0.39 y 0.06 h], 'String', compose('%gx', speedOptions), ...
-    'Value', iSpeed, 'Callback', @onSpeed);
-addLabel('View', [0.47 y 0.035 h*0.7]);
-uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', ...
-    'Position', [0.505 y 0.08 h], 'String', viewNames, 'Value', 1, ...
-    'Callback', @onView);
-uicontrol(fig, 'Style', 'pushbutton', 'String', 'Reset view', 'Units', 'normalized', ...
-    'Position', [0.59 y 0.06 h], 'Callback', @(~,~) applyView());
-addLabel('Vehicle scale', [0.67 y 0.07 h*0.7]);
-hScale = uicontrol(fig, 'Style', 'edit', 'Units', 'normalized', ...
-    'Position', [0.74 y 0.04 h], 'String', num2str(scale), 'Callback', @onScale);
-addLabel('Vert. exag.', [0.80 y 0.06 h*0.7]);
-uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', ...
-    'Position', [0.86 y 0.05 h], 'String', compose('%gx', veOptions), ...
-    'Value', find(veOptions == ve), 'Callback', @onVerticalExaggeration);
+row = uigridlayout(controls, [1 10], 'ColumnWidth', ...
+    {'fit', 70, 'fit', 95, 90, 'fit', 60, 'fit', 60, '1x'}, ...
+    'Padding', 0, 'BackgroundColor', 'w');
+uilabel(row, 'Text', 'Speed');
+uidropdown(row, 'Items', compose('%gx', speedOptions), 'ItemsData', speedOptions, ...
+    'Value', speed, 'Tag', 'speed', 'ValueChangedFcn', @onSpeed);
+uilabel(row, 'Text', 'View');
+uidropdown(row, 'Items', viewNames, 'Value', viewMode, 'Tag', 'view', ...
+    'ValueChangedFcn', @onView);
+uibutton(row, 'Text', 'Reset view', 'Tag', 'resetView', 'ButtonPushedFcn', @(~,~) applyView());
+uilabel(row, 'Text', 'Vehicle scale');
+uieditfield(row, 'numeric', 'Limits', [0.01 Inf], 'Value', scale, 'Tag', 'scale', ...
+    'ValueChangedFcn', @onScale);
+uilabel(row, 'Text', 'Vert. exag.');
+uidropdown(row, 'Items', compose('%gx', veOptions), 'ItemsData', veOptions, ...
+    'Value', ve, 'Tag', 'vertExag', 'ValueChangedFcn', @onVerticalExaggeration);
 
 tmr = timer('Name', 'auv1Visualiser', 'ExecutionMode', 'fixedSpacing', ...
-    'Period', 0.033, 'BusyMode', 'drop', 'TimerFcn', @onTick);
+    'Period', 0.03, 'BusyMode', 'drop', 'TimerFcn', @(~,~) onTick());
+fig.DeleteFcn = @(~,~) onDelete();
 
-showFrame(1);
-applyView();
+applyView();   % Also draws the first frame
 if nargout == 0; clear fig; end
 
 % ==============================================================================
 % NESTED FUNCTIONS (share the state above)
 % ==============================================================================
     function showFrame(kNew)
+        % Draws sample kNew in every part of the window that shows time
         k = max(1, min(N, kNew));
         p = pos(k,:);
 
-        % Vehicle pose in exaggerated units (hExag scales back). Dk*R is the
+        % Vehicle pose in exaggerated units (hExag scales back). D*R is the
         % attitude as seen with depth exaggerated; its nearest rotation keeps
         % the hull shape while lining the vehicle up with the exaggerated path.
-        Dk = diag([1 1 ve]);
-        [Us, ~, Vs] = svd(Dk * Rzyx(eta(k,4), eta(k,5), eta(k,6)));
-        hVehicle.Matrix = [scale * (Us * Vs'), Dk * p'; 0 0 0 1];
+        D = diag([1 1 ve]);
+        [Us, ~, Vs] = svd(D * Rzyx(eta(k,4), eta(k,5), eta(k,6)));
+        hVehicle.Matrix = [scale * (Us * Vs'), D * p'; 0 0 0 1];
 
         % Fin deflections: positive delta_r turns the trailing edge to
         % starboard (yaw to starboard), positive delta_s turns it down (pitch
-        % nose down), matching the signs of Y_r, Z_s and tau in auv1.m
+        % nose down), matching the signs of Y_r, Z_s and tau in auv1.m, and
+        % saturated at delta_max as in auv1.m
         hRudder.Matrix = finRotation(hRudder.UserData, 'zrotate', ...
             -min(max(d.ui(k,1), -deltaMax), deltaMax));
         hStern.Matrix = finRotation(hStern.UserData, 'yrotate', ...
             min(max(d.ui(k,2), -deltaMax), deltaMax));
 
+        setLine(hTrail, pos([1:trailStride:k-1, k], :));
         set(hDrop, 'XData', [p(1) p(1)], 'YData', [p(2) p(2)], 'ZData', [p(3) zFloor]);
         set(hShadow, 'XData', p(1), 'YData', p(2));
-        seg = [];
-        if hasPath; seg = densify(W(kAct(k):kAct(k)+1,:), 100); end
-        if strcmp(viewMode, 'Follow')
-            followCamera();
-            setLine(hTrail, clipToCamera(pos(1:k,:)));
-            setLine(hPath, clipToCamera(pos));
-            setLine(hFloorPath, clipToCamera(floorPath));
-            if hasPath
-                setLine(hDesired, clipToCamera(Wd));
-                setLine(hActive, clipToCamera(seg));
-            end
-        else
-            setLine(hTrail, pos(1:k,:));
-            if hasPath; setLine(hActive, seg); end
-        end
+        if ~isempty(hActive); setLine(hActive, W(kAct(k):kAct(k)+1,:)); end
+        if strcmp(viewMode, 'Follow'); followCamera(); end
 
-        set(hCursor, 'Value', t(k));
+        set(hCursor, 'XData', [t(k) t(k)]);
         hSlider.Value = t(k);
-        hTime.String = sprintf('t = %.1f / %.1f s', t(k), t(end));
-        hHud.String = hudText();
+        hTime.Text = sprintf('t = %.2f / %.2f s', t(k), t(end));
+        hHud.Text = hudText();
     end
 
     function lines = hudText()
@@ -300,7 +326,7 @@ if nargout == 0; clear fig; end
         lines = {
             sprintf(' %s, %s', d.modeName, d.kinematicsName)
             ''
-            sprintf(' Time          %8.1f s', t(k))
+            sprintf(' Time          %8.2f s  (sample %d of %d)', t(k), k, N)
             sprintf(' North / East  %8.1f / %.1f m', e(1), e(2))
             sprintf(' Depth         %8.1f m%s', e(3), refText(d.z_d(k)))
             sprintf(' Speed U       %8.2f m/s', U(k))
@@ -314,7 +340,7 @@ if nargout == 0; clear fig; end
             sprintf(' Current       %8.2f m/s towards %.0f deg', d.Vc(k), ...
                 rad2deg(mod(d.betaVc(k), 2*pi)))
             };
-        if hasPath
+        if ~isempty(kAct)
             kA = kAct(k);
             if kA < nW
                 lines{end+1} = sprintf(' Waypoint      %5d -> %d (%.0f m to go)', ...
@@ -323,12 +349,8 @@ if nargout == 0; clear fig; end
                 lines{end+1} = sprintf(' Waypoint      %5d (final, holding bearing)', kA);
             end
         end
-        if isfinite(d.y_e(k))
-            lines{end+1} = sprintf(' Cross-track   %8.2f m', d.y_e(k));
-        end
-        if isfinite(d.z_e(k))
-            lines{end+1} = sprintf(' Vert.-track   %8.2f m', d.z_e(k));
-        end
+        if hasTrack; lines{end+1} = sprintf(' Cross-track   %8.2f m', d.y_e(k)); end
+        if hasVert;  lines{end+1} = sprintf(' Vert.-track   %8.2f m', d.z_e(k)); end
     end
 
     function followCamera()
@@ -362,44 +384,35 @@ if nargout == 0; clear fig; end
             case 'Follow'
                 % Grid and box seen up close in perspective are clutter
                 set(ax, 'Projection', 'perspective', 'Visible', 'off');
-                followCamera();
         end
         if ~strcmp(viewMode, 'Follow')
             % The auto fit leaves a wide margin; use more of the axes. Setting
             % the angle also freezes the zoom while rotating.
             ax.CameraViewAngle = 0.8 * ax.CameraViewAngle;
-            % Undo any clipping from Follow view
-            setLine(hPath, pos);
-            setLine(hFloorPath, floorPath);
-            if hasPath; setLine(hDesired, Wd); end
         end
         showFrame(k);
     end
 
-    function P = clipToCamera(P)
-        % Hides the points less than a fifth of the camera distance in front
-        % of the camera. In perspective, a line passing behind the camera
-        % may not be drawn at all, so lines are cut before they get there.
-        % Distances are in display units (depth exaggerated by ve).
-        c = ax.CameraPosition;
-        v = (ax.CameraTarget - c) .* [1 1 ve];
-        ahead = ((P - c) .* [1 1 ve]) * (v' / norm(v));
-        P(ahead < 0.2 * norm(v), :) = NaN;
-    end
-
-    function seekTime(tq)
+    function seek(tq)
+        % Jumps to the logged sample nearest to time tq
         [~, kNew] = min(abs(t - tq));
         showFrame(kNew);
-        if playing; tSim0 = t(k); wall0 = tic; end % Continue from here
+        if playing; clock0 = t(k); wall0 = tic; end   % Play on from here
+    end
+
+    function step(dt)
+        % Moves by dt seconds. Callbacks must call this rather than
+        % @() seek(t(k) + dt): an anonymous function keeps the k it was made with.
+        seek(t(k) + dt);
     end
 
     function togglePlay()
         if playing
             stopPlayback();
         else
-            if k >= N; showFrame(1); end   % Replay from the start
-            tSim0 = t(k);  wall0 = tic;  playing = true;
-            hPlay.String = 'Pause';
+            if k == N; showFrame(1); end   % Replay from the start
+            clock0 = t(k);  wall0 = tic;  playing = true;
+            hPlay.Text = 'Pause';
             if strcmp(tmr.Running, 'off'); start(tmr); end
         end
     end
@@ -407,82 +420,76 @@ if nargout == 0; clear fig; end
     function stopPlayback()
         playing = false;
         if isvalid(tmr) && strcmp(tmr.Running, 'on'); stop(tmr); end
-        if isvalid(hPlay); hPlay.String = 'Play'; end
+        if isvalid(hPlay); hPlay.Text = 'Play'; end
     end
 
-    function onTick(~, ~)
+    function onTick()
+        % Shows the last sample at or before the playback clock. limitrate
+        % does not wait for the window to draw (each wait costs tens of ms);
+        % frames it drops are replaced by the next one.
+        if ~playing || ~isvalid(fig); return; end
         try
-            if ~playing || ~isvalid(fig); return; end
-            tq = tSim0 + speed * toc(wall0);   % Sim time follows the wall clock
+            tq = clock0 + speed * toc(wall0);
             if tq >= t(end)
                 showFrame(N);
                 stopPlayback();
+                drawnow
             else
-                [~, kNew] = min(abs(t - tq));
-                showFrame(kNew);
+                showFrame(find(t <= tq, 1, 'last'));
+                drawnow limitrate
             end
-            drawnow limitrate
         catch err
             stopPlayback();
-            warning('auv1Visualiser:playback', 'Playback stopped: %s', err.message);
+            warning('auv1Visualiser:playback', 'Playback stopped:\n%s', ...
+                getReport(err, 'extended', 'hyperlinks', 'off'));
         end
     end
 
+    function onDrag(~, evt)
+        stopPlayback();
+        seek(evt.Value);
+    end
+
     function onSpeed(src, ~)
-        speed = speedOptions(src.Value);
-        if playing; tSim0 = t(k); wall0 = tic; end
+        speed = src.Value;
+        if playing; clock0 = t(k); wall0 = tic; end
     end
 
     function onView(src, ~)
-        viewMode = viewNames{src.Value};
+        viewMode = src.Value;
         applyView();
     end
 
     function onScale(src, ~)
-        val = str2double(src.String);
-        if isfinite(val) && val > 0
-            scale = val;
-            showFrame(k);
-        end
-        src.String = num2str(scale);
+        scale = src.Value;
+        showFrame(k);
     end
 
     function onVerticalExaggeration(src, ~)
-        ve = veOptions(src.Value);
+        ve = src.Value;
         ax.DataAspectRatio = [1 1 1/ve];
         hExag.Matrix = makehgtform('scale', [1 1 1/ve]);
-        showFrame(k);
         applyView();
     end
 
-    function onPlotClick(src, ~)
-        seekTime(src.CurrentPoint(1,1));
-    end
-
     function onKey(~, evt)
-        step = 1;
-        if any(strcmp(evt.Modifier, 'shift')); step = 10; end
+        dt = 1;
+        if any(strcmp(evt.Modifier, 'shift')); dt = 10; end
         switch evt.Key
             case 'space';      togglePlay();
-            case 'rightarrow'; seekTime(t(k) + step);
-            case 'leftarrow';  seekTime(t(k) - step);
-            case 'home';       seekTime(t(1));
-            case 'end';        seekTime(t(end));
+            case 'rightarrow'; step(dt);
+            case 'leftarrow';  step(-dt);
+            case 'home';       seek(t(1));
+            case 'end';        seek(t(end));
         end
     end
 
-    function onDelete(~, ~)
+    function onDelete()
         playing = false;
         if isvalid(tmr)
             stop(tmr);
             delete(tmr);
         end
-    end
-
-    function addLabel(str, position)
-        uicontrol(fig, 'Style', 'text', 'String', str, 'Units', 'normalized', ...
-            'Position', position, 'HorizontalAlignment', 'right', ...
-            'BackgroundColor', 'w');
     end
 
 end % auv1Visualiser
@@ -593,39 +600,68 @@ end
 end
 
 function v = column(s, path, nCol, N, keep)
-% Returns s.(path{1}).(path{2})... as N-by-nCol (rows keep), or NaN if absent.
+% Returns s.(path{1}).(path{2})... as numel(keep)-by-nCol, or NaN if it is
+% absent. A field of the wrong size is not shown, with a warning.
 v = NaN(numel(keep), nCol);
 for i = 1:numel(path)
     if ~isstruct(s) || ~isfield(s, path{i}); return; end
     s = s.(path{i});
 end
 if isvector(s) && numel(s) == N && nCol == 1; s = s(:); end
-if size(s,1) == N && size(s,2) >= nCol
+if isnumeric(s) && size(s,1) == N && size(s,2) >= nCol
     v = double(s(keep, 1:nCol));
+else
+    warning('auv1Visualiser:fieldSize', '%s is %s, expected %d-by-%d; not shown.', ...
+        strjoin(path, '.'), mat2str(size(s)), N, nCol);
 end
 end
 
-function kAct = activeWaypoints(p, W, R_switch, ControlFlag)
+function kAct = replayWaypoints(p, W, R_switch, ControlFlag, y_e, z_e)
 % Replays the waypoint switching of ALOSpsi (ControlFlag 3) or ALOS3D (4) on
-% the logged positions; these are the positions the guidance law saw, since
-% SIMauv1 logs the state before each update.
-n = size(W, 1);
-kAct = ones(size(p,1), 1);
+% the logged positions (SIMauv1 logs the state the guidance law sees), and
+% recomputes the tracking errors the guidance law logged along the way. The
+% formulas are those of ALOSpsi.m and ALOS3D.m. If the errors do not match,
+% the replay is not what the simulation did, and kAct is returned empty.
+kAct = [];
+if ~any(ControlFlag == [3 4]) || ~any(isfinite(y_e)); return; end
+n = size(W, 1);  N = size(p, 1);
+kAct = ones(N, 1);
+e = NaN(N, 2);              % Replayed [y_e z_e]
 k = 1;
-for i = 1:size(p,1)
-    if k < n
-        if ControlFlag == 3 % Along-track distance left to the next waypoint
-            pi_h = atan2(W(k+1,2) - W(k,2), W(k+1,1) - W(k,1));
-            x_e = (p(i,1) - W(k,1)) * cos(pi_h) + (p(i,2) - W(k,2)) * sin(pi_h);
-            dist = sqrt((W(k+1,1) - W(k,1))^2 + (W(k+1,2) - W(k,2))^2);
-            switchNow = dist - x_e < R_switch;
-        else                % Inside the circle of acceptance
-            switchNow = sqrt((W(k+1,1) - p(i,1))^2 + (W(k+1,2) - p(i,2))^2 ...
-                + (W(k+1,3) - p(i,3))^2) < R_switch;
-        end
-        if switchNow; k = k + 1; end
+for i = 1:N
+    xk = W(k,1);  yk = W(k,2);  zk = W(k,3);
+    if k < n                % Next waypoint, or continue with the last bearing
+        xn = W(k+1,1);  yn = W(k+1,2);  zn = W(k+1,3);
+    else
+        bearing = atan2(W(n,2) - W(n-1,2), W(n,1) - W(n-1,1));
+        xn = W(n,1) + 1e10 * cos(bearing);  yn = W(n,2) + 1e10 * sin(bearing);
+        zn = W(n,3);
     end
+    pi_h = atan2(yn - yk, xn - xk);
+    if ControlFlag == 3     % Along-track distance left to the next waypoint
+        x_e = (p(i,1) - xk) * cos(pi_h) + (p(i,2) - yk) * sin(pi_h);
+        e(i,1) = -(p(i,1) - xk) * sin(pi_h) + (p(i,2) - yk) * cos(pi_h);
+        dist = sqrt((xn - xk)^2 + (yn - yk)^2);
+        switchNow = dist - x_e < R_switch;
+    else                    % Inside the circle of acceptance
+        pi_v = atan2(-(zn - zk), sqrt((xn - xk)^2 + (yn - yk)^2));
+        Rz = [cos(pi_h) -sin(pi_h) 0; sin(pi_h) cos(pi_h) 0; 0 0 1];
+        Ry = [cos(pi_v) 0 sin(pi_v); 0 1 0; -sin(pi_v) 0 cos(pi_v)];
+        ev = Ry' * Rz' * [p(i,1) - xk, p(i,2) - yk, p(i,3) - zk]';
+        e(i,:) = ev(2:3)';
+        switchNow = sqrt((xn - p(i,1))^2 + (yn - p(i,2))^2 + (zn - p(i,3))^2) < R_switch;
+    end
+    if switchNow && k < n; k = k + 1; end
     kAct(i) = k;
+end
+
+dev = abs(e(:,1) - y_e);
+if ControlFlag == 4; dev = max(dev, abs(e(:,2) - z_e)); end
+if ~all(dev <= 1e-6)        % Also fails on NaN
+    warning('auv1Visualiser:waypointReplay', ['The waypoint replay does not ' ...
+        'reproduce the logged tracking errors (first mismatch at sample %d); ' ...
+        'the active waypoint is not shown.'], find(~(dev <= 1e-6), 1));
+    kAct = [];
 end
 end
 
@@ -679,8 +715,8 @@ xs = xHinge + [0.35 * cRoot, 0.35 * cRoot - sweep, 0.35 * cRoot - sweep - cTip, 
 rs = [rRoot, rRoot + span, rRoot + span, rRoot];
 finOpts = {'FaceColor', [0.12 0.12 0.14], 'EdgeColor', 'none', 'Clipping', 'off'};
 
-hRudder = hgtransform(parent, 'UserData', xHinge);   % Top and bottom
-hStern = hgtransform(parent, 'UserData', xHinge);    % Port and starboard
+hRudder = hgtransform(parent, 'UserData', xHinge, 'Tag', 'rudderFins'); % Top and bottom
+hStern = hgtransform(parent, 'UserData', xHinge, 'Tag', 'sternFins');   % Port and starboard
 for dirn = [-1 1]
     patch('Parent', hRudder, 'XData', xs, 'YData', 0 * rs, 'ZData', dirn * rs, finOpts{:});
     patch('Parent', hStern, 'XData', xs, 'YData', dirn * rs, 'ZData', 0 * rs, finOpts{:});
@@ -705,17 +741,6 @@ V = [X(:) Y(:) Z(:)];
 F = [1 2 4 3; 5 6 8 7; 1 2 6 5; 3 4 8 7; 1 3 7 5; 2 4 8 6];
 end
 
-function Q = densify(P, n)
-% Splits each segment of the polyline P (one point per row) into n pieces,
-% so clipping at the camera in Follow view drops only the part behind it.
-s = (0:n-1)' / n;
-Q = zeros((size(P,1) - 1) * n + 1, 3);
-for i = 1:size(P,1) - 1
-    Q((i-1)*n + (1:n), :) = P(i,:) + s .* (P(i+1,:) - P(i,:));
-end
-Q(end,:) = P(end,:);
-end
-
 function [tt, yy] = breakWraps(t, y)
 % Inserts NaN at +-180 deg wraps so the plotted angle has no vertical lines
 jump = [false; abs(diff(y)) > 180];
@@ -724,7 +749,12 @@ tt = NaN(numel(y) + nnz(jump), 1);  yy = tt;
 tt(idx) = t;  yy(idx) = y;
 end
 
+function s = coloured(str, rgb)
+% TeX string str in colour rgb, for plot titles that double as legends
+s = sprintf('{\\color[rgb]{%g %g %g}%s}', rgb, str);
+end
+
 function s = refText(x)
-% Formats a reference value for the HUD, or nothing if it is not available
+% Formats a reference value for the readout, or nothing if it is not available
 if isfinite(x); s = sprintf('  (ref %.1f)', x); else; s = ''; end
 end
