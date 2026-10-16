@@ -1,15 +1,22 @@
-function SIMauv1()
-% This script simulates the Remus 100 Autonomous Underwater Vehicle (AUV) 
-% under depth and heading control while exposed to ocean currents. It supports 
-% both Euler angle and unit quaternion kinematics representations and features 
-% advanced control strategies including PID pole-placement, integral sliding 
-% mode control for heading, and Adaptive Line-of-Sight (ALOS) guidance for 2.5-D 
-% and 3-D path following. For 2.5-D path following the desired pitch angle is 
-% computed using a gradient-based outer-loop depth control law (gradient descent 
+function SIMauv1(ControlFlag, KinematicsFlag)
+% This script simulates the Remus 100 Autonomous Underwater Vehicle (AUV)
+% under depth and heading control while exposed to ocean currents. It supports
+% both Euler angle and unit quaternion kinematics representations and features
+% advanced control strategies including PID pole-placement, integral sliding
+% mode control for heading, and Adaptive Line-of-Sight (ALOS) guidance for 2.5-D
+% and 3-D path following. For 2.5-D path following the desired pitch angle is
+% computed using a gradient-based outer-loop depth control law (gradient descent
 % on the depth tracking error).
+%
+% Usage:
+%   SIMauv1                              : Select options in a dialog box
+%   SIMauv1(ControlFlag, KinematicsFlag) : ControlFlag = 1-4 (see dialog),
+%                                          KinematicsFlag = 1 (Euler angles)
+%                                          or 2 (unit quaternions)
 %
 % Dependencies:
 %   auv1.m                - Dynamics of the AUV1 vehicle
+%   auv1Params.m          - Model, control system and guidance parameters
 %   integralSMCheading.m  - Integral sliding mode control for heading
 %   refModel.m            - Reference model for autopilot systems
 %   ALOSpsi.m             - 2-D ALOS guidance algorithm for path following
@@ -49,8 +56,7 @@ function SIMauv1()
 %   2025-12-07: Added control method for gradient-based depth control and 2.5-D ALOS
 %               (Fossen and Coates, 2026).
 
-clearvars;                               % Clear all variables from memory
-clear integralSMCheading ALOS3D ALOSpsi; % Clear persistent states 
+clear integralSMCheading ALOS3D ALOSpsi; % Clear persistent states
 close all;                               % Close all open figure windows
 
 % ==============================================================================
@@ -59,7 +65,11 @@ close all;                               % Close all open figure windows
 h = 0.05;                           % Sampling time (s)
 T_final = 1400;	                    % Final simulation time (s)
 
-[ControlFlag, KinematicsFlag] = controlMethod();
+if nargin < 2
+    [ControlFlag, KinematicsFlag] = controlMethod();
+end
+
+P = auv1Params();                   % Model, control and guidance parameters
 
 % Define waypoints for 3D path following
 wpt.pos.x = [0  -20 -100   0  200, 200  400];
@@ -91,9 +101,9 @@ betaVc = deg2rad(30);          % Horizontal direction (radians)
 wc = 0.1;                      % Vertical speed (m/s)
 
 % Initialize propeller dynamics
-n_max = 1525;                  % Maximum propeller speed (RPM)
-n_rate = 0.1;                  % Rate limit (RPM per update)
-n_p = 1000;                    % Initial propeller speed (RPM)
+n_max = P.model.n_max;         % Maximum propeller speed (RPM)
+n_rate = P.model.n_rate;       % Rate limit (RPM per update)
+n_p = 1000;                   % Initial propeller speed (RPM)
 n_d = 1300;                    % Desired propeller speed (RPM)
 
 % Time vector initialization
@@ -103,10 +113,11 @@ nTimeSteps = length(t);         % Number of time steps
 % ==============================================================================
 % CONTROL SYSTEM CONFIGURATION
 % ==============================================================================
-delta_max = deg2rad(20);       % Maximum rudder and stern angle (rad)
+% Parameters are defined in auv1Params.m
+delta_max = P.model.delta_max; % Maximum rudder and stern angle (rad)
 
 % Setup for depth and heading control
-z_max = 100;                   % Maximum depth (m)
+z_max = P.model.z_max;         % Maximum depth (m)
 psi_step = deg2rad(-60);       % Step change in heading angle (rad)
 z_step = 30;                   % Step change in depth, max 100 m
 
@@ -118,54 +129,30 @@ psi_int = 0;                   % Integral state for yaw control
 % Depth controller (successive-loop closure)
 z_d = zn;                      % Initial desired depth (m)
 zdot_d = 0;                    % Initial desired vertical velocity (m/s)
-Kp_z = 0.1;                    % Proportional gain for depth
-T_z = 100;                     % Time constant for integral action in depth control
-k_grad = 0.1;                  % Gain for computation of theta_d
-
-[~,~,Mauv] = auv1();           % AUV1 mass matrix
-w_theta = 0.8;                 % Natural frequency in pitch (rad/s)
-Kp_theta = Mauv(5,5) * w_theta^2; % Proportional gain for pitch control
-Kd_theta = Mauv(5,5) * 2 * 0.8 * w_theta; % Derivative gain for pitch control
-Ki_theta = Kp_theta * w_theta / 10; % Integral gain for pitch control
-
-wn_d_z = 0.05;                   % Natural frequency for depth control
-w_max = 3.0;                     % Maximum dive speed (m/s)
-theta_max = deg2rad(30.0);       % Maximum pitch angle (rad)
+Kp_z = P.ctrl.Kp_z;  T_z = P.ctrl.T_z;  k_grad = P.ctrl.k_grad;
+Kp_theta = P.ctrl.Kp_theta;  Kd_theta = P.ctrl.Kd_theta;  Ki_theta = P.ctrl.Ki_theta;
+wn_d_z = P.ctrl.wn_d_z;  zeta_d_z = P.ctrl.zeta_d_z;
+w_max = P.ctrl.w_max;  theta_max = P.ctrl.theta_max;
 LP.z_d = makeLowPass(wn_d_z, h); % Low-pass filter object
 
-% Heading control parameters (using Nomoto model)
-K_yaw = 5 / 20;                % Gain, max rate of turn over max. rudder angle
-T_yaw = 1;                     % Time constant for yaw dynamics
-zeta_d_psi = 1.0;              % Desired damping ratio for yaw control
-wn_d_psi = 0.1;                % Natural frequency for yaw control
-r_max = deg2rad(5.0);          % Maximum allowable rate of turn (rad/s)
-
-% Heading autopilot (Equation 16.479 in Fossen 2027)
-% sigma = r-r_d + 2*lambda*ssa(psi-psi_d) + lambda^2 * integral(ssa(psi-psi_d))
-% delta = (T_yaw*r_r_dot + r_r - K_d*sigma - K_sigma*(sigma/phi_b)) / K_yaw
-lambda = 0.1;
-phi_b = 0.1;                   % Boundary layer thickness
+% Heading control (Nomoto model) and heading autopilot
+K_yaw = P.ctrl.K_yaw;  T_yaw = P.ctrl.T_yaw;
+zeta_d_psi = P.ctrl.zeta_d_psi;  wn_d_psi = P.ctrl.wn_d_psi;  r_max = P.ctrl.r_max;
+lambda = P.ctrl.lambda;  lambda_alos = P.ctrl.lambda_alos;  phi_b = P.ctrl.phi_b;
 
 if ControlFlag == 1 % PID control parameters
-    K_d = 0.5;                 % Derivative gain for PID controller
-    K_sigma = 0;               % Gain for SMC (inactive when using PID)
+    K_d = P.ctrl.pid.K_d;  K_sigma = P.ctrl.pid.K_sigma;
 else                % SMC control parameters
-    K_d = 0;                   % Derivative gain inactive in SMC mode
-    K_sigma = 0.05;            % Sliding mode control gain
+    K_d = P.ctrl.smc.K_d;  K_sigma = P.ctrl.smc.K_sigma;
 end
 
 % ==============================================================================
 % ALOS PATH-FOLLOWING PARAMETERS
 % ==============================================================================
-Delta_h = 20;               % Horizontal look-ahead distance (m)
-Delta_v = 20;               % Vertical look-ahead distance (m)
-gamma_h = 0.001;            % Adaptive gain, horizontal plane
-gamma_v = 0.001;            % Adaptive gain, vertical plane
-M_theta = deg2rad(20);      % Maximum value of estimates, alpha_c, beta_c
-
-% Additional parameter for straigh-line path following
-R_switch = 5;               % Radius of switching circle
-K_f = 0.5;                  % LOS observer gain
+Delta_h = P.guidance.Delta_h;  Delta_v = P.guidance.Delta_v;
+gamma_h = P.guidance.gamma_h;  gamma_v = P.guidance.gamma_v;
+M_theta = P.guidance.M_theta;
+R_switch = P.guidance.R_switch;  K_f = P.guidance.K_f;
 
 % ==============================================================================
 % INPUT RANGE CHECK
@@ -259,10 +246,10 @@ for i = 1:nTimeSteps
 
             % Heading autopilot using the tail rudder (integral SMC)
             delta_r = integralSMCheading(psi, r, psi_d, r_d, a_d, ...
-                K_d, K_sigma, 1, phi_b, K_yaw, T_yaw, h);
+                K_d, K_sigma, lambda_alos, phi_b, K_yaw, T_yaw, h);
             delta_r = sat(delta_r, delta_max);
 
-            % 2-D ALOS guidance law 
+            % 2-D ALOS guidance law
             [psi_ref,~,~,k_active] = ALOSpsi(xn,yn,Delta_h,gamma_h,h,R_switch,wpt);
             z_ref = wpt.pos.z(k_active); % Use z-coordinate as depth reference
 
@@ -281,12 +268,12 @@ for i = 1:nTimeSteps
             r_d = sat(r_d, r_max);
 
             % Propagate reference model for desired depth (k+1)
-            [z_d,zdot_d,a_d] = refModel(z_d,zdot_d,a_d,z_ref,w_max,1.0,wn_d_z,h,0);
+            [z_d,zdot_d,a_d] = refModel(z_d,zdot_d,a_d,z_ref,w_max,zeta_d_z,wn_d_z,h,0);
 
         otherwise % Control flag 4 (3-D ALOS path-following)
             % Heading autopilot using the tail rudder (integral SMC)
             delta_r = integralSMCheading(psi, r, psi_d, r_d, a_d, ...
-                K_d, K_sigma, 1, phi_b, K_yaw, T_yaw, h);
+                K_d, K_sigma, lambda_alos, phi_b, K_yaw, T_yaw, h);
             delta_r = sat(delta_r, delta_max);
 
             % Depth autopilot using the stern planes (PID)
@@ -344,10 +331,10 @@ for i = 1:nTimeSteps
 
    if (KinematicsFlag == 1)
        % Euler angles x = [ u v w p q r x y z phi theta psi ]'
-       x = rk4(@auv1, h, x, ui, Vc, betaVc, wc);  % RK4 method x(k+1)
+       x = rk4(@auv1, h, x, ui, Vc, betaVc, wc, P.model);  % RK4 method x(k+1)
    else
-       % Unit quaternions x = [ u v w p q r x y z eta eps1 eps2 eps3 ]'  
-       xdot = auv1(x, ui, Vc, betaVc, wc);
+       % Unit quaternions x = [ u v w p q r x y z eta eps1 eps2 eps3 ]'
+       xdot = auv1(x, ui, Vc, betaVc, wc, P.model);
        quat = x(10:13);                            % Unit quaternion
        x(1:6) = x(1:6) + h * xdot(1:6);            % Forward Euler
        x(7:9) = x(7:9) + h * Rquat(quat) * x(1:3); % Backward Euler

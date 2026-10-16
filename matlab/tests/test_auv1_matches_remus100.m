@@ -25,6 +25,7 @@ assert(strcmp(fileparts(which('remus100')), refDir), 'remus100 not resolved to t
 
 rng(1);
 maxErr = 0;
+P = auv1Params(); % Explicit parameters, as passed by SIMauv1
 
 % Mass matrix from the empty call
 [~,~,M_auv] = auv1();
@@ -56,6 +57,10 @@ for k = 1:nSamples
         [xdot_a, U_a] = auv1(x, ui, Vc, betaVc, w_c);
         [xdot_r, U_r] = remus100(x, ui, Vc, betaVc, w_c);
         maxErr = max(maxErr, checkMatch(xdot_a, xdot_r, U_a, U_r, tol, k, s, 'currents'));
+
+        % 3-D currents, explicit model parameters
+        [xdot_a, U_a] = auv1(x, ui, Vc, betaVc, w_c, P.model);
+        maxErr = max(maxErr, checkMatch(xdot_a, xdot_r, U_a, U_r, tol, k, s, 'currents, P.model'));
     end
 end
 
