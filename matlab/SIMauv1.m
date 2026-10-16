@@ -1,4 +1,4 @@
-function SIMremus100()
+function SIMauv1()
 % This script simulates the Remus 100 Autonomous Underwater Vehicle (AUV) 
 % under depth and heading control while exposed to ocean currents. It supports 
 % both Euler angle and unit quaternion kinematics representations and features 
@@ -9,7 +9,7 @@ function SIMremus100()
 % on the depth tracking error).
 %
 % Dependencies:
-%   remus100.m            - Dynamics of the Remus 100 AUV
+%   auv1.m                - Dynamics of the AUV1 vehicle
 %   integralSMCheading.m  - Integral sliding mode control for heading
 %   refModel.m            - Reference model for autopilot systems
 %   ALOSpsi.m             - 2-D ALOS guidance algorithm for path following
@@ -17,7 +17,6 @@ function SIMremus100()
 %   LOSobserver.m         - Observer for LOS guidance 
 %   q2euler.m, ssa.m      - Utilities for quaternion to Euler conversion 
 %                           and angle wrapping
-%   displayVehicleData    - Display the vehicle data and an image of the vehicle
 %
 % Simulink Models:
 %   demoAUVdepthHeadingControl.slx : Depth and heading control.
@@ -123,7 +122,7 @@ Kp_z = 0.1;                    % Proportional gain for depth
 T_z = 100;                     % Time constant for integral action in depth control
 k_grad = 0.1;                  % Gain for computation of theta_d
 
-[~,~,Mauv] = remus100();       % Remus 100 mass matrix
+[~,~,Mauv] = auv1();           % AUV1 mass matrix
 w_theta = 0.8;                 % Natural frequency in pitch (rad/s)
 Kp_theta = Mauv(5,5) * w_theta^2; % Proportional gain for pitch control
 Kd_theta = Mauv(5,5) * 2 * 0.8 * w_theta; % Derivative gain for pitch control
@@ -345,10 +344,10 @@ for i = 1:nTimeSteps
 
    if (KinematicsFlag == 1)
        % Euler angles x = [ u v w p q r x y z phi theta psi ]'
-       x = rk4(@remus100, h, x, ui, Vc, betaVc, wc);  % RK4 method x(k+1)
+       x = rk4(@auv1, h, x, ui, Vc, betaVc, wc);  % RK4 method x(k+1)
    else
        % Unit quaternions x = [ u v w p q r x y z eta eps1 eps2 eps3 ]'  
-       xdot = remus100(x, ui, Vc, betaVc, wc);
+       xdot = auv1(x, ui, Vc, betaVc, wc);
        quat = x(10:13);                            % Unit quaternion
        x(1:6) = x(1:6) + h * xdot(1:6);            % Forward Euler
        x(7:9) = x(7:9) + h * Rquat(quat) * x(1:3); % Backward Euler
@@ -572,16 +571,7 @@ if ControlFlag == 4 % 3-D ALOS
     view(-25, 30);  % view(AZ,EL)
 end
 
-% Display the vehicle data and an image of the vehicle
-vehicleData = {...
-    'Length', '1.6 m',...
-    'Diameter', '19 cm',...
-    'Mass', '31.9 kg',...
-    'Max speed', '2.5 m/s',...
-    'Max propeller speed', '1525 RPM'};
-displayVehicleData('Remus100 AUV', vehicleData, 'remus100.jpg', 8);
-
-end % SIMremus100
+end % SIMauv1
 
 % ==============================================================================
 % FUNCTIONS
