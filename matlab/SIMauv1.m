@@ -1,4 +1,4 @@
-function simOut = SIMauv1(ControlFlag, KinematicsFlag)
+function simOut = SIMauv1(ControlFlag, KinematicsFlag, path)
 % This script simulates the Remus 100 Autonomous Underwater Vehicle (AUV)
 % under depth and heading control while exposed to ocean currents. It supports
 % both Euler angle and unit quaternion kinematics representations and features
@@ -13,6 +13,9 @@ function simOut = SIMauv1(ControlFlag, KinematicsFlag)
 %   SIMauv1(ControlFlag, KinematicsFlag) : ControlFlag = 1-4 (see dialog),
 %                                          KinematicsFlag = 1 (Euler angles)
 %                                          or 2 (unit quaternions)
+%   SIMauv1(ControlFlag, KinematicsFlag, path) : Follow path (struct as
+%                                          returned by pathParams.m) instead
+%                                          of pathParams()
 %   simOut = SIMauv1(...)                : Also return the logged results as a
 %                                          struct, e.g. to save the run and
 %                                          replay it later with auv1Visualiser
@@ -23,6 +26,10 @@ function simOut = SIMauv1(ControlFlag, KinematicsFlag)
 % Dependencies:
 %   auv1.m                - Dynamics of the AUV1 vehicle
 %   auv1Params.m          - Model, control system and guidance parameters
+%   pathParams.m          - Path to follow: waypoints and step commands
+%   navigation/           - Navigation commands and reference propagation
+%   control/              - Depth and tracking (fin) controllers, actuator inputs
+%   physics/              - Measurements, ocean current and state propagation
 %   integralSMCheading.m  - Integral sliding mode control for heading
 %   refModel.m            - Reference model for autopilot systems
 %   ALOSpsi.m             - 2-D ALOS guidance algorithm for path following
@@ -78,11 +85,9 @@ if nargin < 2
 end
 
 P = auv1Params();                   % Model, control and guidance parameters
-
-% Define waypoints for 3D path following
-wpt.pos.x = [0  -20 -100   0  200, 200  400];
-wpt.pos.y = [0  200  600 950 1300 1800 2200];
-wpt.pos.z = [0   10  100 100   50   50   50];
+if nargin < 3; path = pathParams(); end
+P.path = path;                      % Path to follow: waypoints and step commands
+wpt = P.path.wpt;
 
 % Initialize position and orientation
 xn = 0; yn = 0; zn = 0;             % Initial North-East-Down positions (m)
@@ -90,10 +95,6 @@ phi = 0; theta = 0;                 % Initial Euler angles (radians)
 psi = atan2(wpt.pos.y(2) - wpt.pos.y(1), ...
     wpt.pos.x(2) - wpt.pos.x(1));   % Yaw angle towards next waypoint
 U = 1;                              % Initial speed (m/s)
-
-% Initial control and state setup
-theta_d = 0; q_d = 0;               % Initial pitch references
-psi_d = psi; r_d = 0; a_d = 0;      % Initial yaw references
 
 % State vector initialization
 if KinematicsFlag == 1  % Euler angles
@@ -108,11 +109,9 @@ Vc = 0.5;                      % Horizontal speed (m/s)
 betaVc = deg2rad(30);          % Horizontal direction (radians)
 wc = 0.1;                      % Vertical speed (m/s)
 
-% Initialize propeller dynamics
-n_max = P.model.n_max;         % Maximum propeller speed (RPM)
-n_rate = P.model.n_rate;       % Rate limit (RPM per update)
-n_p = 1000;                   % Initial propeller speed (RPM)
-n_d = 1300;                    % Desired propeller speed (RPM)
+% Initialize actuator states (control/actuatorInputs.m)
+act.n_p = 1000;                    % Initial propeller speed (RPM)
+act.n_d = 1300;                    % Desired propeller speed (RPM)
 
 % AUV1 actuators (P.model.actuators = 'auv1'): the controller outputs are
 % mixed to four fin PWM signals with a servo slew-rate limit, the stern
@@ -122,12 +121,11 @@ isAUV1 = strcmp(P.model.actuators, 'auv1');
 if isAUV1
     pwm_centre = P.model.pwm_centre;       % Neutral PWM (us)
     pwm_range = P.model.pwm_range;         % PWM range at full effort (us)
-    fin_angle = zeros(4,1);                % Fin angles [top bottom left right] (rad)
+    act.fin_angle = zeros(4,1);            % Fin angles [top bottom left right] (rad)
     stern_effort = 0.5;                    % Stern thruster effort (-1..1)
-    pwm_stern_cmd = pwm_centre + stern_effort * pwm_range; % 1700 us
-    pwm_stern = pwm_centre;                % Stern PWM after the thruster lag (us)
-    pwm_bow = pwm_centre;                  % Bow PWM, held at neutral (us)
-    a_thruster = exp(-h / P.model.thruster_tau); % Discrete first-order lag
+    act.pwm_stern_cmd = pwm_centre + stern_effort * pwm_range; % 1700 us
+    act.pwm_stern = pwm_centre;            % Stern PWM after the thruster lag (us)
+    act.pwm_bow = pwm_centre;              % Bow PWM, held at neutral (us)
 end
 
 % Time vector initialization
@@ -137,52 +135,24 @@ nTimeSteps = length(t);         % Number of time steps
 % ==============================================================================
 % CONTROL SYSTEM CONFIGURATION
 % ==============================================================================
-% Parameters are defined in auv1Params.m
-delta_max = P.model.delta_max; % Maximum rudder and stern angle (rad)
+% Parameters are defined in auv1Params.m and the path in pathParams.m
 
-% Setup for depth and heading control
-z_max = P.model.z_max;         % Maximum depth (m)
-psi_step = deg2rad(-60);       % Step change in heading angle (rad)
-z_step = 30;                   % Step change in depth, max 100 m
+% Desired states for the tracking controller
+ref.z_d = zn;  ref.zdot_d = 0;               % Initial depth references
+ref.theta_d = 0;  ref.q_d = 0;               % Initial pitch references
+ref.psi_d = psi;  ref.r_d = 0;  ref.a_d = 0; % Initial yaw references
 
 % Integral states for autopilots
 z_int = 0;                     % Integral state for depth control
 theta_int = 0;                 % Integral state for pitch control
-psi_int = 0;                   % Integral state for yaw control
 
-% Depth controller (successive-loop closure)
-z_d = zn;                      % Initial desired depth (m)
-zdot_d = 0;                    % Initial desired vertical velocity (m/s)
-Kp_z = P.ctrl.Kp_z;  T_z = P.ctrl.T_z;  k_grad = P.ctrl.k_grad;
-Kp_theta = P.ctrl.Kp_theta;  Kd_theta = P.ctrl.Kd_theta;  Ki_theta = P.ctrl.Ki_theta;
-wn_d_z = P.ctrl.wn_d_z;  zeta_d_z = P.ctrl.zeta_d_z;
-w_max = P.ctrl.w_max;  theta_max = P.ctrl.theta_max;
-LP.z_d = makeLowPass(wn_d_z, h); % Low-pass filter object
-
-% Heading control (Nomoto model) and heading autopilot
-K_yaw = P.ctrl.K_yaw;  T_yaw = P.ctrl.T_yaw;
-zeta_d_psi = P.ctrl.zeta_d_psi;  wn_d_psi = P.ctrl.wn_d_psi;  r_max = P.ctrl.r_max;
-lambda = P.ctrl.lambda;  lambda_alos = P.ctrl.lambda_alos;  phi_b = P.ctrl.phi_b;
-
-if ControlFlag == 1 % PID control parameters
-    K_d = P.ctrl.pid.K_d;  K_sigma = P.ctrl.pid.K_sigma;
-else                % SMC control parameters
-    K_d = P.ctrl.smc.K_d;  K_sigma = P.ctrl.smc.K_sigma;
-end
-
-% ==============================================================================
-% ALOS PATH-FOLLOWING PARAMETERS
-% ==============================================================================
-Delta_h = P.guidance.Delta_h;  Delta_v = P.guidance.Delta_v;
-gamma_h = P.guidance.gamma_h;  gamma_v = P.guidance.gamma_v;
-M_theta = P.guidance.M_theta;
-R_switch = P.guidance.R_switch;  K_f = P.guidance.K_f;
+LP.z_d = makeLowPass(P.ctrl.wn_d_z, h); % Low-pass filter for the depth command
 
 % ==============================================================================
 % INPUT RANGE CHECK
 % ==============================================================================
-rangeCheck(n_d, 0, n_max); 
-rangeCheck(z_step, 0, z_max);
+rangeCheck(act.n_d, 0, P.model.n_max);
+rangeCheck(P.path.step.z, 0, P.model.z_max);
 rangeCheck(U, 0, 5);
 
 % ==============================================================================
@@ -193,216 +163,43 @@ alosData = zeros(nTimeSteps, 4); % Preallocate table for ALOS guidance data
 
 for i = 1:nTimeSteps
 
-    % Measurements
-    u = x(1);                  % Surge velocity (m/s)
-    v = x(2);                  % Sway veloiciy (m/s)
-    w = x(3);                  % Heave velocity (m/s)
-    q = x(5);                  % Pitch rate (rad/s)
-    r = x(6);                  % Yaw rate (rad/s)
-    xn = x(7);                 % North position (m)
-    yn = x(8);                 % East position (m)
-    zn = x(9);                 % Down position (m), depth
+    y = measurements(x);                        % Measurements
 
-    % Kinematic representation
-    switch KinematicsFlag
-        case 1
-            theta = x(11); psi = x(12); % Euler angles
-        otherwise
-            [~,theta,psi] = q2euler(x(10:13)); % Quaternion to Euler angles
+    % Navigation: depth, heading and pitch commands at t(i)
+    [cmd, alosData(i,:)] = navigation(t(i), y, ControlFlag, P.path, P.guidance, h);
+    if ControlFlag <= 2
+        ref.z_d = LP.z_d(cmd.z_ref);            % LP filtering the depth command
     end
 
-    % References used by the autopilots at t(i). The control laws below
-    % propagate them to t(i+1), so they are logged from here.
-    ref_k = [z_d theta_d psi_d r_d];
+    % References used by the autopilots at t(i). They are propagated to
+    % t(i+1) below, so they are logged from here.
+    ref_k = [ref.z_d ref.theta_d ref.psi_d ref.r_d];
 
-    % Control systems
-    switch ControlFlag
+    % Control: fin angles at t(i), the references at t(i+1), actuator inputs
+    [delta_r, delta_s] = trackingController(y, ref, theta_int, ControlFlag, ...
+        P.ctrl, P.model.delta_max, h);
+    if ControlFlag <= 3
+        ref.theta_d = depthController(y, ref, z_int, ControlFlag, P.ctrl, h);
+    end
+    ref = updateReferences(ref, cmd, ControlFlag, P.ctrl, P.guidance, h);
+    [ui, ui_log, act] = actuatorInputs(delta_r, delta_s, act, P.model, h);
 
-        case {1, 2}  % Gradient-based depth control and heading autopilot
-            % Depth command, z_ref, and heading angle command, psi_ref
-            if t(i) > 200
-                z_ref = z_step;
-                psi_ref = psi_step;
-            else
-                z_ref = 10;
-                psi_ref = deg2rad(0);
-            end
-
-           % Depth autopilot using the stern planes 
-            delta_s = -Kp_theta * ssa(theta - theta_d)...   % PID
-               - Kd_theta * q - Ki_theta * theta_int;
-            delta_s = sat(delta_s, delta_max);
-
-            % Depth kinematics: 
-            %   z_dot = -u * sin(theta) + w * cos(theta) := alpha_z + sigma
-            % Virtual control:
-            %   alpha_z = z_d_dot + Kp_z * (e_z + (1/T_z) * z_int)
-            %
-            % Outer-loop depth control residual sigma = 0 implies e_z = 0
-            z_d = LP.z_d(z_ref); % LP filtering the depth command
-            ref_k(1) = z_d;      % The filtered command is used at t(i)
-
-            sigma = -u * sin(theta) + w * cos(theta) ...
-                + Kp_z * ((zn - z_d) + (1/T_z) * z_int);
-
-            % Gradient-descent update using J = 1/2 * sigma^2 to drive sigma to 0:            
-            % Residual sensitivity: d(sigma)/d(theta)
-            % Gradient: dJ/d(theta) = d(sigma)/d(theta) * sigma
-            if abs(w/u) > 0.176 % abs(w/u) > 10 deg
-                gradJ = -(u * cos(theta) + w * sin(theta));
-            else % Simplified gradient when abs(w/u) < 10 deg
-                gradJ = -sign(u);
-            end
-
-            % Propagate gradient-based depth command (k+1)
-            theta_d = theta_d - h * k_grad * gradJ * sigma;
-            theta_d = sat(theta_d, theta_max);
-
-            % Heading autopilot using the tail rudder
-            delta_r = integralSMCheading(psi, r, psi_d, r_d, a_d, ...
-                K_d, K_sigma, lambda, phi_b, K_yaw, T_yaw, h);
-            delta_r = sat(delta_r, delta_max);
-
-            % Propagate reference model for heading angle (k+1)
-            [psi_d, r_d, a_d] = refModel(psi_d, r_d, a_d, psi_ref, r_max,...
-                zeta_d_psi, wn_d_psi, h, 1);
-
-        case 3 % 2-D ALOS guidance law
-           % Depth autopilot using the stern planes 
-            delta_s = -Kp_theta * ssa(theta - theta_d)...   % PID
-               - Kd_theta * q - Ki_theta * theta_int;
-            delta_s = sat(delta_s, delta_max);
-
-            % Heading autopilot using the tail rudder (integral SMC)
-            delta_r = integralSMCheading(psi, r, psi_d, r_d, a_d, ...
-                K_d, K_sigma, lambda_alos, phi_b, K_yaw, T_yaw, h);
-            delta_r = sat(delta_r, delta_max);
-
-            % 2-D ALOS guidance law
-            [psi_ref,y_e,beta_c_hat,k_active] = ALOSpsi(xn,yn,Delta_h,gamma_h,h,R_switch,wpt);
-            z_ref = wpt.pos.z(k_active); % Use z-coordinate as depth reference
-
-            % Gradient-based depth command (down position)
-            sigma = -u * sin(theta) + w * cos(theta) ...
-                + Kp_z * ((zn - z_d) + (1/T_z) * z_int);
-
-            gradJ = -(u * cos(theta) + w * sin(theta));
-
-            % Propagate gradient-based depth command (k+1)
-            theta_d = theta_d - h * k_grad * gradJ * sigma;
-            theta_d = sat(theta_d, theta_max);
-            
-            % Propagate ALOS observer (k+1)
-            [psi_d, r_d] = LOSobserver(psi_d, r_d, psi_ref, h, K_f);
-            r_d = sat(r_d, r_max);
-
-            % Propagate reference model for desired depth (k+1)
-            [z_d,zdot_d,a_d] = refModel(z_d,zdot_d,a_d,z_ref,w_max,zeta_d_z,wn_d_z,h,0);
-
-            % Store ALOS data in table (no vertical-track error in 2.5-D)
-            alosData(i,:) = [y_e NaN NaN beta_c_hat];
-
-        otherwise % Control flag 4 (3-D ALOS path-following)
-            % Heading autopilot using the tail rudder (integral SMC)
-            delta_r = integralSMCheading(psi, r, psi_d, r_d, a_d, ...
-                K_d, K_sigma, lambda_alos, phi_b, K_yaw, T_yaw, h);
-            delta_r = sat(delta_r, delta_max);
-
-            % Depth autopilot using the stern planes (PID)
-            delta_s = -Kp_theta * ssa(theta - theta_d)...
-                - Kd_theta * q - Ki_theta * theta_int;
-            delta_s = sat(delta_s, delta_max);
-
-            % 3-D ALOS guidance law
-            [psi_ref, theta_ref, y_e, z_e, alpha_c_hat, beta_c_hat] = ...
-                ALOS3D(xn, yn, zn, Delta_h, Delta_v, gamma_h, gamma_v,...
-                M_theta, h, R_switch, wpt);
-
-            % Propagate ALOS observers
-            [theta_d, q_d] = LOSobserver(theta_d, q_d, theta_ref, h, K_f);
-            [psi_d, r_d] = LOSobserver(psi_d, r_d, psi_ref, h, K_f);
-            r_d = sat(r_d, r_max);
-
-            % Ocean current dynamics
-            if t(i) > 800
-                Vc_d = 0.65;
-                w_V = 0.05;
-                Vc = exp(-h*w_V) * Vc + (1 - exp(-h*w_V)) * Vc_d;
-            else
-                Vc = 0.5;
-            end
-
-            if t(i) > 500
-                betaVc_d = deg2rad(160);
-                w_beta = 0.1;
-                betaVc = exp(-h*w_beta) * betaVc + (1 - exp(-h*w_beta)) * betaVc_d;
-            else
-                betaVc = deg2rad(150);
-            end
-
-            betaVc = betaVc + randn / 1000;
-            Vc = Vc + 0.002 * randn;
-
-            % Store ALOS data in table
-            alosData(i,:) = [y_e z_e alpha_c_hat beta_c_hat];
+    % Physics: ocean current, then the state at t(i+1)
+    if ControlFlag == 4
+        [Vc, betaVc] = oceanCurrent(t(i), Vc, betaVc, h);
     end
 
-   if isAUV1
-       % Normalised yaw and pitch commands with the same moment sign as the
-       % REMUS rudder and stern planes (+yaw_cmd: N > 0, +pitch_cmd: M > 0),
-       % mixed to the four fins as on the vehicle (fin_mixer.m)
-       yaw_cmd = delta_r / delta_max;
-       pitch_cmd = delta_s / delta_max;
-       roll_cmd = 0;                       % No roll loop yet
-       [~, deflection] = fin_mixer(pitch_cmd, roll_cmd, yaw_cmd);
+    simData(i,:) = [ref_k Vc betaVc wc ui_log' x']; % Store simulation data in a table
 
-       % Servo slew-rate limit on the fin angles
-       d_max = P.model.servo_slew * h;
-       fin_angle = fin_angle + max(-d_max, min(d_max, deflection * delta_max - fin_angle));
-       pwm_fins = deflection_to_pwm(fin_angle / delta_max);
+    x = physicsStep(x, ui, Vc, betaVc, wc, P.model, h);
 
-       % Stern thruster PWM with first-order lag, bow thruster at neutral
-       pwm_stern = a_thruster * pwm_stern + (1 - a_thruster) * pwm_stern_cmd;
-
-       % Control input vector [top bottom left right stern bow] (us)
-       ui = [pwm_fins; pwm_stern; pwm_bow];
-       ui_log = [delta_r -delta_s pwm_stern]';
-   else
-       % Propeller speed (RPM)
-       if n_p < n_d
-           n_p = n_p + n_rate;
-       elseif n_p > n_d
-           n_p = n_p - n_rate;
-       end
-       n_p = sat(n_p, n_max);
-
-       % Control input vector
-       ui = [delta_r -delta_s n_p]';
-       ui_log = ui;
-   end
-
-   % Store simulation data in a table
-   simData(i,:) = [ref_k Vc betaVc wc ui_log' x'];
-
-   if (KinematicsFlag == 1)
-       % Euler angles x = [ u v w p q r x y z phi theta psi ]'
-       x = rk4(@auv1, h, x, ui, Vc, betaVc, wc, P.model);  % RK4 method x(k+1)
-   else
-       % Unit quaternions x = [ u v w p q r x y z eta eps1 eps2 eps3 ]'
-       xdot = auv1(x, ui, Vc, betaVc, wc, P.model);
-       quat = x(10:13);                            % Unit quaternion
-       x(1:6) = x(1:6) + h * xdot(1:6);            % Forward Euler
-       x(7:9) = x(7:9) + h * Rquat(quat) * x(1:3); % Backward Euler
-       quat = expm(Tquat(x(4:6)) * h) * quat;  % Exact quat. discretization
-       x(10:13) = quat / norm(quat);           % Normalization
-   end
-
-   % Euler's integration method (k+1)
-   z_int = z_int + h * ( zn - z_d );
-   theta_int = theta_int + h * ssa( theta - theta_d );
-   psi_int = psi_int + h * ssa( psi - psi_d );
+    % Euler's integration method (k+1)
+    z_int = z_int + h * ( y.zn - ref.z_d );
+    theta_int = theta_int + h * ssa( y.theta - ref.theta_d );
 
 end
+
+theta = y.theta; % Last measured pitch angle, used by the Euler-angle crab-angle plots
 
 % ==============================================================================
 % PLOTS
@@ -626,7 +423,8 @@ out.ControlFlag = ControlFlag;
 out.KinematicsFlag = KinematicsFlag;
 out.eta = eta;                          % [x y z phi theta psi], NED (m, rad)
 out.nu = nu;                            % [u v w p q r] (m/s, rad/s)
-out.ui = ui;                            % [delta_r delta_s n] applied (rad, rad, RPM)
+out.ui = ui;                            % [delta_r delta_s n] applied (rad, rad, RPM),
+                                        % stern thruster PWM (us) for AUV1 actuators
 out.ref.z_d = simData(:,1);             % Desired depth (m), ControlFlag 1-3
 out.ref.theta_d = theta_d;              % Desired pitch angle (rad)
 out.ref.psi_d = psi_d;                  % Desired yaw angle (rad)
