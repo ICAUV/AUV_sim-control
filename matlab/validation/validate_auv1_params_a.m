@@ -22,7 +22,7 @@ P = auv1Params('auv1');
 model = P.model;
 
 fprintf('=== Parameter summary (auv1) ===\n');
-[~,~,M] = auv1(zeros(12,1), zeros(3,1), 0, 0, 0, model);
+[~,~,M] = auv1(zeros(12,1), model.ui0, 0, 0, 0, model);
 MRB = spheroid(model.a, model.b, zeros(3,1), model.r_bG);
 fprintf('Spheroid mass            : %.4f kg (target 22)\n', MRB(1,1));
 fprintf('a, b                     : %.4f m, %.4f m (L/2 = %.3f, D/2 = %.3f)\n', ...
@@ -146,7 +146,7 @@ X = zeros(numel(t), numel(x0));
 x = x0;
 for i = 1:numel(t)
     X(i,:) = x';
-    x = rk4(@auv1, h, x, zeros(3,1), 0, 0, 0, model);
+    x = rk4(@auv1, h, x, model.ui0, 0, 0, 0, model);
 end
 end
 
@@ -155,8 +155,8 @@ function A = linearise(model)
 n = 12; A = zeros(n); eps_ = 1e-6;
 for j = 1:n
     dx = zeros(n,1); dx(j) = eps_;
-    fp = auv1(dx,  zeros(3,1), 0, 0, 0, model);
-    fm = auv1(-dx, zeros(3,1), 0, 0, 0, model);
+    fp = auv1(dx,  model.ui0, 0, 0, 0, model);
+    fm = auv1(-dx, model.ui0, 0, 0, 0, model);
     A(:,j) = (fp - fm) / (2*eps_);
 end
 A = A(setdiff(1:n, [7 8 9 12]), setdiff(1:n, [7 8 9 12])); % Drop x, y, z, psi (no restoring)

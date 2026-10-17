@@ -106,6 +106,22 @@ n_rate = P.model.n_rate;       % Rate limit (RPM per update)
 n_p = 1000;                   % Initial propeller speed (RPM)
 n_d = 1300;                    % Desired propeller speed (RPM)
 
+% AUV1 actuators (P.model.actuators = 'auv1'): the controller outputs are
+% mixed to four fin PWM signals with a servo slew-rate limit, the stern
+% thruster runs at a constant PWM with a first-order lag, and the bow
+% thruster is held at neutral (blending is not part of this scenario).
+isAUV1 = strcmp(P.model.actuators, 'auv1');
+if isAUV1
+    pwm_centre = P.model.pwm_centre;       % Neutral PWM (us)
+    pwm_range = P.model.pwm_range;         % PWM range at full effort (us)
+    fin_angle = zeros(4,1);                % Fin angles [top bottom left right] (rad)
+    stern_effort = 0.5;                    % Stern thruster effort (-1..1)
+    pwm_stern_cmd = pwm_centre + stern_effort * pwm_range; % 1700 us
+    pwm_stern = pwm_centre;                % Stern PWM after the thruster lag (us)
+    pwm_bow = pwm_centre;                  % Bow PWM, held at neutral (us)
+    a_thruster = exp(-h / P.model.thruster_tau); % Discrete first-order lag
+end
+
 % Time vector initialization
 t = 0:h:T_final;                % Time vector from 0 to T_final          
 nTimeSteps = length(t);         % Number of time steps
@@ -315,19 +331,42 @@ for i = 1:nTimeSteps
             alosData(i,:) = [y_e z_e alpha_c_hat beta_c_hat];
     end
 
-   % Propeller speed (RPM)
-   if n_p < n_d
-       n_p = n_p + n_rate;
-   elseif n_p > n_d
-       n_p = n_p - n_rate;
-   end
-   n_p = sat(n_p, n_max);
+   if isAUV1
+       % Normalised yaw and pitch commands with the same moment sign as the
+       % REMUS rudder and stern planes (+yaw_cmd: N > 0, +pitch_cmd: M > 0),
+       % mixed to the four fins as on the vehicle (fin_mixer.m)
+       yaw_cmd = delta_r / delta_max;
+       pitch_cmd = delta_s / delta_max;
+       roll_cmd = 0;                       % No roll loop yet
+       [~, deflection] = fin_mixer(pitch_cmd, roll_cmd, yaw_cmd);
 
-   % Control input vector
-   ui = [delta_r -delta_s n_p]';            
+       % Servo slew-rate limit on the fin angles
+       d_max = P.model.servo_slew * h;
+       fin_angle = fin_angle + max(-d_max, min(d_max, deflection * delta_max - fin_angle));
+       pwm_fins = deflection_to_pwm(fin_angle / delta_max);
+
+       % Stern thruster PWM with first-order lag, bow thruster at neutral
+       pwm_stern = a_thruster * pwm_stern + (1 - a_thruster) * pwm_stern_cmd;
+
+       % Control input vector [top bottom left right stern bow] (us)
+       ui = [pwm_fins; pwm_stern; pwm_bow];
+       ui_log = [delta_r -delta_s pwm_stern]';
+   else
+       % Propeller speed (RPM)
+       if n_p < n_d
+           n_p = n_p + n_rate;
+       elseif n_p > n_d
+           n_p = n_p - n_rate;
+       end
+       n_p = sat(n_p, n_max);
+
+       % Control input vector
+       ui = [delta_r -delta_s n_p]';
+       ui_log = ui;
+   end
 
    % Store simulation data in a table
-   simData(i,:) = [z_d theta_d psi_d r_d Vc betaVc wc ui' x'];
+   simData(i,:) = [z_d theta_d psi_d r_d Vc betaVc wc ui_log' x'];
 
    if (KinematicsFlag == 1)
        % Euler angles x = [ u v w p q r x y z phi theta psi ]'
@@ -451,7 +490,11 @@ xlabel('Time (s)'),title('Rudder command \delta_r (deg)'),grid
 subplot(312),plot(t,rad2deg(ui(:,2)))
 xlabel('Time (s)'),title('Stern-plane command \delta_s (deg)'),grid
 subplot(313),plot(t,ui(:,3))
-xlabel('Time (s)'),title('Propeller speed command n (rpm)'),grid
+if isAUV1
+    xlabel('Time (s)'),title('Stern thruster PWM (\mus)'),grid
+else
+    xlabel('Time (s)'),title('Propeller speed command n (rpm)'),grid
+end
 set(findall(gcf,'type','line'),'linewidth',1.5)
 set(findall(gcf,'type','text'),'FontSize',12)
 
