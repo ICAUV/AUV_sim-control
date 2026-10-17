@@ -7,10 +7,12 @@ function P = auv1Params(vehicle)
 %   P.guidance  - ALOS path-following parameters
 %
 % vehicle selects the model parameter set:
-%   'auv1'      - AUV1 hull, mass, buoyancy and fins (default). The propeller
-%                 is still the REMUS 100 one (pass B replaces it).
-%   'remus100'  - Original MSS REMUS 100 values, used as the reference in
-%                 tests/test_auv1_matches_remus100.m.
+%   'auv1'      - AUV1 hull, mass, buoyancy and actuators (default): four
+%                 independent fins, T500 stern thruster, T200 bow thruster,
+%                 driven by six PWM signals (model.actuators = 'auv1').
+%   'remus100'  - Original MSS REMUS 100 values and actuators (rudder, stern
+%                 planes, propeller in RPM; model.actuators = 'remus100'),
+%                 used as the reference in tests/test_auv1_matches_remus100.m.
 %
 % Field names match the variable names used in auv1.m and SIMauv1.m.
 % Derived quantities (planform area, spheroid semi-axes, parasitic drag
@@ -60,6 +62,7 @@ switch lower(vehicle)
         % inside the free-flooded sections (~ rho*pi*(D/2)^2*L). The deck
         % gives ~20 kg dry.
         m_target = 22;
+        model.m_target = m_target;
 
         % Spheroid semi-axes (m) | derived from m_target. spheroid() computes
         % m = 4/3*pi*rho_mss*a*b^2, so the hull spheroid is scaled by k to
@@ -86,12 +89,57 @@ switch lower(vehicle)
 
         % Fin x-position from mid-length, rudder and stern plane (m) |
         % ESTIMATE, +-0.05, until the hinge is measured
-        model.x_r = -0.45;
-        model.x_s = -0.45;
+        model.x_fin = -0.45;
+        model.x_r = model.x_fin;
+        model.x_s = model.x_fin;
 
         % Maximum rudder and stern-plane angle (rad) | 25 deg,
         % auv1-sim/config/vehicle.json | unverified
         model.delta_max = deg2rad(25);
+
+        % --- Actuators (pass B): four fins, T500 stern, T200 bow ----------
+        % Driven by the six PWM signals of the autopilot, in us:
+        % ui = [top bottom left right stern bow]'
+        model.actuators = 'auv1';
+        model.ui0 = 1500 * ones(6,1);          % Neutral inputs (us)
+
+        % Radial position of the fin centre of pressure (m) | ESTIMATE,
+        % +-0.02, until measured. The fins sit at (x_fin, 0, -+r_fin) for
+        % top/bottom and (x_fin, -+r_fin, 0) for left/right.
+        model.r_fin = 0.13;
+
+        % Fin force direction for a positive deflection (-1, +1) | ESTIMATE.
+        % Order [top bottom left right]'. Along body y for top/bottom and
+        % along body z for left/right. Chosen to be consistent with the pitch
+        % and yaw columns of fin_mixer.SIGNS under the vehicle_control.py
+        % conventions (+pitch_cmd nose up, +yaw_cmd heading increasing).
+        % To be replaced by the per-fin bench test (one fin at a time to PWM
+        % 1900, record trailing-edge direction and angle).
+        model.fin_sign = [-1 1 -1 1]';
+
+        % Fin PWM to angle (us) | auv1-software auv1/fin_mixer.py:
+        % PWM = 1500 + 400 * deflection. +-400 us maps linearly to
+        % +-delta_max | ESTIMATE until the bench test measures the angle at
+        % PWM 1900.
+        model.pwm_centre = 1500;
+        model.pwm_range = 400;
+
+        % Bow tunnel thruster x-position (m) | ESTIMATE, +-0.05
+        model.x_bow = 0.40;
+
+        % Thrust directions (-1, +1) | ESTIMATE until a props-on bench check:
+        % stern thrust along +x for PWM > 1500, bow thrust along +y for
+        % PWM > 1500, both on the centreline.
+        model.stern_dir = +1;
+        model.bow_dir = +1;
+
+        % Servo slew rate (rad/s) | 300 deg/s, auv1-sim/config/vehicle.json |
+        % unverified. Used in SIMauv1.
+        model.servo_slew = deg2rad(300);
+
+        % Thruster first-order lag (s) | auv1-sim/config/vehicle.json |
+        % unverified. Used in SIMauv1.
+        model.thruster_tau = 0.15;
 
     case 'remus100'
         % Original MSS REMUS 100 values; Fossen (2027, Chapter 8) and
@@ -113,6 +161,10 @@ switch lower(vehicle)
         model.x_s = -model.a;          % Stern-plane x-position (m)
 
         model.delta_max = deg2rad(20); % Maximum rudder and stern angles (rad)
+
+        model.m_target = 31.9;         % Vehicle mass (kg)
+        model.actuators = 'remus100';  % Tail rudder, stern planes and propeller (RPM)
+        model.ui0 = zeros(3,1);        % Neutral inputs [delta_r delta_s n]
 
     otherwise
         error('auv1Params:vehicle', ...
@@ -153,7 +205,8 @@ model.T6 = 1;                      % Time constant in yaw (s)
 model.z_max = 100;                 % Maximum depth (m)
 
 % ------------------------------------------------------------------------------
-% REMUS PLACEHOLDER: replaced by T500 in pass B (both parameter sets)
+% REMUS propeller: used by the 'remus100' actuators only. The AUV1 actuators
+% use the T500 and T200 thrust tables below instead.
 % ------------------------------------------------------------------------------
 model.n_max = 1525;                % Maximum propeller speed (RPM)
 model.n_rate = 0.1;                % Propeller rate limit (RPM per update)
@@ -183,6 +236,17 @@ if strcmpi(vehicle, 'auv1')
         MRB(1,1), m_target);
 end
 
+% Thrust tables, AUV1 actuators (pwm_us, force_N) | Blue Robotics public
+% performance data at 14.8 V, interpolated in voltage between the 14 V and
+% 16 V sheets, static bollard thrust (no loss with forward speed). Built by
+% data/thrusters/make_thrust_tables.m | manufacturer uncertainty not stated;
+% ESTIMATE until a bench or pool check.
+if strcmpi(vehicle, 'auv1')
+    thrDir = fullfile(fileparts(mfilename('fullpath')), 'data', 'thrusters');
+    model.T500 = loadThrustTable(fullfile(thrDir, 'T500_14v8.csv')); % Stern thruster
+    model.T200 = loadThrustTable(fullfile(thrDir, 'T200_14v8.csv')); % Bow tunnel thruster
+end
+
 P.model = model;
 
 % ==============================================================================
@@ -198,7 +262,7 @@ ctrl.w_max = 3.0;                  % Maximum dive speed (m/s)
 ctrl.theta_max = deg2rad(30.0);    % Maximum pitch angle (rad)
 
 % Pitch controller (PID pole placement using the model mass matrix)
-[~,~,M] = auv1(zeros(12,1), zeros(3,1), 0, 0, 0, model);
+[~,~,M] = auv1(zeros(12,1), model.ui0, 0, 0, 0, model);
 ctrl.w_theta = 0.8;                % Natural frequency in pitch (rad/s)
 ctrl.zeta_theta = 0.8;             % Relative damping ratio in pitch
 ctrl.Kp_theta = M(5,5) * ctrl.w_theta^2;                   % Proportional gain
@@ -241,4 +305,20 @@ guidance.K_f = 0.5;                % LOS observer gain
 
 P.guidance = guidance;
 
+end
+
+function tbl = loadThrustTable(file)
+% Reads a thrust table written by data/thrusters/make_thrust_tables.m
+if ~isfile(file)
+    error('auv1Params:thrustTable', ...
+        'Thrust table %s not found. Run data/thrusters/make_thrust_tables.m.', file);
+end
+A = readmatrix(file, 'CommentStyle', '#');
+assert(size(A,2) == 2 && all(diff(A(:,1)) > 0) && all(isfinite(A(:)) ), ...
+    'auv1Params:thrustTable', 'Unexpected layout in %s', file);
+tbl.pwm = A(:,1);
+tbl.force = A(:,2);
+tbl.dpwm = tbl.pwm(2) - tbl.pwm(1);       % Uniform PWM step (us)
+assert(all(abs(diff(tbl.pwm) - tbl.dpwm) < 1e-9), ...
+    'auv1Params:thrustTable', 'PWM grid of %s is not uniform', file);
 end

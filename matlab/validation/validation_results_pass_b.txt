@@ -1,0 +1,61 @@
+=== 0. Thrust tables (14.8 V, bollard) ===
+T500: F(1500) = 0.000 N, F(1600) = 10.003 N, F(1700) = 28.067 N, F(1900) = 78.944 N, F(1100) = -52.466 N
+T200: F(1500) = 0.000 N, F(1700) = 16.280 N, F(1900) = 47.193 N, F(1100) = -36.656 N
+
+=== 1. Equivalence test ===
+PASS: auv1 matches remus100 (max abs difference 0, tol 1e-12)
+
+=== 2. Actuator sign test ===
++yaw_cmd 0.5   : fins [1700 1300 1500 1500], N = +0.4712 Nm (Y = -1.0472 N, M = +0.0000 Nm)
++pitch_cmd 0.5 : fins [1500 1500 1300 1700], M = +0.6597 Nm (Z = +1.4661 N, N = +0.0000 Nm)
+stern 1700 us  : X = +28.0666 N
+bow 1700 us    : Y = +16.2805 N, N = +6.5122 Nm
+
+roll_cmd = +1 : fin PWM [1100 1100 1100 1100] (deflections [-1 -1 -1 -1])
+  top    fin alone: K = +0.1361 Nm
+  bottom fin alone: K = +0.1361 Nm
+  left   fin alone: K = -0.1906 Nm
+  right  fin alone: K = -0.1906 Nm
+  all four fins : K = -0.1089 Nm
+  top + bottom  : K = +0.2723 Nm, left + right: K = -0.3812 Nm
+  (the roll column of fin_mixer.SIGNS gives the same deflection on all four fins;
+   whether the contributions add or cancel depends on the per-fin force signs)
+
+PASS: auv1 actuator signs
+
+=== 3. Pass A regression, neutral PWM ===
+At rest, dB = 0, 60 s: max |velocity| = 0 (limit 1e-6)  ->  PASS
+At rest, dB = 2 N: rise speed 0.1128 m/s (pass A: 0.1128)  ->  PASS
+
+=== 4. TG5 case 2: straight runs, stern PWM 1600-1900 ===
+Hand calc: T = 0.5*rho*Cd*A*U^2 with the model hull drag (rho = 1025 as used inside the MSS drag helper, Cd = 0.42, A = pi*b^2 = 0.02583 m2)
+  PWM us   T500 (N)  U sim (m/s) U hand (m/s)   sim/hand
+    1600      10.00        1.337        1.341      0.997   (dU/dt at end 0.0e+00 m/s2, pitch -0.00 deg)
+    1700      28.07        2.246        2.247      1.000   (dU/dt at end 0.0e+00 m/s2, pitch -0.00 deg)
+    1800      52.35        3.068        3.069      1.000   (dU/dt at end 0.0e+00 m/s2, pitch 0.00 deg)
+    1900      78.94        3.768        3.768      1.000   (dU/dt at end 0.0e+00 m/s2, pitch -0.00 deg)
+Bollard thrust is used at every speed (no loss with forward speed), so these speeds are an upper bound.
+
+=== 5. TG5 case 3: turning circle ===
+Stern PWM for 1.00 m/s straight: 1566.1 us (T500 force 5.25 N)
+Rudder 20 deg: yaw_cmd = 0.80, fin PWM [1820 1180 1500 1500]
+Steady turn: yaw rate 0.098 rad/s (5.60 deg/s), speed 0.873 m/s, roll 0.48 deg, sideslip -12.85 deg
+Turning radius: 8.94 m from speed/yaw rate, 8.94 m from a circle fit of the last 30 s (auv1-sim earlier estimate ~7 m, rough cross-check only)
+Turn direction: yaw rate positive (starboard), as +yaw_cmd requires
+
+=== 6. TG5 case 4: 10 deg stern-plane step ===
+Stern plane 10 deg: pitch_cmd = 0.40, fin PWM [1500 1500 1340 1660]
+  t =  5 s: pitch   6.71 deg, depth rate -0.137 m/s (negative = rising), speed 0.971 m/s
+  t = 10 s: pitch   6.60 deg, depth rate -0.141 m/s (negative = rising), speed 0.969 m/s
+  t = 20 s: pitch   6.59 deg, depth rate -0.141 m/s (negative = rising), speed 0.969 m/s
+  t = 40 s: pitch   6.59 deg, depth rate -0.141 m/s (negative = rising), speed 0.969 m/s
+  t = 60 s: pitch   6.59 deg, depth rate -0.141 m/s (negative = rising), speed 0.969 m/s
+Final: pitch 6.59 deg, depth rate -0.141 m/s, depth 11.81 m (started at 20 m)
+
+=== 7. SIMauv1(1, 1) end to end ===
+Completed without error in 8.6 s; 4 figures, 588021 plotted points, 0 non-finite  ->  PASS
+  Depth (m)    tracking error after 100 s: RMS 0.759, max 6.307, final 0.000
+  Pitch (deg)  tracking error after 100 s: RMS 0.322, max 3.754, final -0.001
+  Yaw (deg)    tracking error after 100 s: RMS 0.420, max 3.210, final -0.001
+  depth: min 0.00 m, max 30.93 m; final true 30.00 vs desired 30.00
+  surge speed: initial 1.00, min 1.00, max 2.74, final 2.25 m/s
