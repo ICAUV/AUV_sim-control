@@ -1,8 +1,10 @@
 # control
 
-Feedback controllers. They take the measurements `y` (`physics/measurements.m`)
-and the desired states `ref` (`navigation/`), with gains from `P.ctrl`
-(`auv1Params.m`).
+Feedback controllers, and the step from their outputs to the actuators. The
+controllers take the measurements `y` (`physics/measurements.m`) and the desired
+states `ref` (`navigation/`), with gains from `P.ctrl` (`auv1Params.m`). They
+output REMUS-style rudder and stern-plane angles; for AUV1 these are mixed to
+the four fins in `actuatorInputs.m`.
 
 ## trackingController.m (inner loop)
 
@@ -47,8 +49,33 @@ The pitch PID above then tracks `theta_d`: successive loop closure, depth
 outside pitch (theory Ch 15.2). The gradient law itself is from Fossen and
 Coates (2026), cited in `SIMauv1.m`.
 
+## actuatorInputs.m
+
+`[ui, ui_log, act] = actuatorInputs(delta_r, delta_s, act, model, h)` turns
+the rudder and stern-plane commands into the inputs of `auv1.m`, for the
+actuator set in `model.actuators`. `act` carries the actuator states between
+samples (set up in `SIMauv1.m`).
+
+AUV1 (`'auv1'`, the default), `ui` = six PWM signals (us):
+
+1. `yaw_cmd = delta_r/delta_max`, `pitch_cmd = delta_s/delta_max`, no roll
+   command, mixed to `[top bottom left right]` deflections by `fin_mixer.m`
+   (same sign table as the vehicle software)
+2. Fin angles follow the deflections at most `servo_slew` per second, then
+   `deflection_to_pwm.m` gives 1500 +- 400 us
+3. Stern thruster PWM goes to `act.pwm_stern_cmd` (1700 us) through a
+   first-order lag (`thruster_tau`); the bow thruster stays at 1500 us
+
+Mixing commands onto several actuators is control allocation (theory Ch 11.2).
+
+REMUS 100 (`'remus100'`): `ui = [delta_r; -delta_s; n_p]`, with `n_p` from
+`propellerSpeed.m`.
+
+`ui_log = [delta_r; -delta_s; stern]` is what `SIMauv1` logs, with the stern
+thruster PWM or the propeller speed last.
+
 ## propellerSpeed.m
 
 `n_p = propellerSpeed(n_p, n_d, model)` moves the propeller speed towards
-`n_d` by `n_rate` RPM per sample, capped at `n_max`. In `SIMauv1.m`,
-`n_p` starts at 1000 RPM and `n_d` is 1300 RPM.
+`n_d` by `n_rate` RPM per sample, capped at `n_max`. Used by the REMUS
+actuators only; `n_p` starts at 1000 RPM and `n_d` is 1300 RPM.

@@ -28,7 +28,7 @@ function simOut = SIMauv1(ControlFlag, KinematicsFlag, path)
 %   auv1Params.m          - Model, control system and guidance parameters
 %   pathParams.m          - Path to follow: waypoints and step commands
 %   navigation/           - Navigation commands and reference propagation
-%   control/              - Depth, tracking (fin) and propeller controllers
+%   control/              - Depth and tracking (fin) controllers, actuator inputs
 %   physics/              - Measurements, ocean current and state propagation
 %   integralSMCheading.m  - Integral sliding mode control for heading
 %   refModel.m            - Reference model for autopilot systems
@@ -109,9 +109,24 @@ Vc = 0.5;                      % Horizontal speed (m/s)
 betaVc = deg2rad(30);          % Horizontal direction (radians)
 wc = 0.1;                      % Vertical speed (m/s)
 
-% Initialize propeller dynamics
-n_p = 1000;                    % Initial propeller speed (RPM)
-n_d = 1300;                    % Desired propeller speed (RPM)
+% Initialize actuator states (control/actuatorInputs.m)
+act.n_p = 1000;                    % Initial propeller speed (RPM)
+act.n_d = 1300;                    % Desired propeller speed (RPM)
+
+% AUV1 actuators (P.model.actuators = 'auv1'): the controller outputs are
+% mixed to four fin PWM signals with a servo slew-rate limit, the stern
+% thruster runs at a constant PWM with a first-order lag, and the bow
+% thruster is held at neutral (blending is not part of this scenario).
+isAUV1 = strcmp(P.model.actuators, 'auv1');
+if isAUV1
+    pwm_centre = P.model.pwm_centre;       % Neutral PWM (us)
+    pwm_range = P.model.pwm_range;         % PWM range at full effort (us)
+    act.fin_angle = zeros(4,1);            % Fin angles [top bottom left right] (rad)
+    stern_effort = 0.5;                    % Stern thruster effort (-1..1)
+    act.pwm_stern_cmd = pwm_centre + stern_effort * pwm_range; % 1700 us
+    act.pwm_stern = pwm_centre;            % Stern PWM after the thruster lag (us)
+    act.pwm_bow = pwm_centre;              % Bow PWM, held at neutral (us)
+end
 
 % Time vector initialization
 t = 0:h:T_final;                % Time vector from 0 to T_final          
@@ -136,7 +151,7 @@ LP.z_d = makeLowPass(P.ctrl.wn_d_z, h); % Low-pass filter for the depth command
 % ==============================================================================
 % INPUT RANGE CHECK
 % ==============================================================================
-rangeCheck(n_d, 0, P.model.n_max);
+rangeCheck(act.n_d, 0, P.model.n_max);
 rangeCheck(P.path.step.z, 0, P.model.z_max);
 rangeCheck(U, 0, 5);
 
@@ -160,22 +175,21 @@ for i = 1:nTimeSteps
     % t(i+1) below, so they are logged from here.
     ref_k = [ref.z_d ref.theta_d ref.psi_d ref.r_d];
 
-    % Control: fin angles at t(i), then the references at t(i+1)
+    % Control: fin angles at t(i), the references at t(i+1), actuator inputs
     [delta_r, delta_s] = trackingController(y, ref, theta_int, ControlFlag, ...
         P.ctrl, P.model.delta_max, h);
     if ControlFlag <= 3
         ref.theta_d = depthController(y, ref, z_int, ControlFlag, P.ctrl, h);
     end
     ref = updateReferences(ref, cmd, ControlFlag, P.ctrl, P.guidance, h);
-    n_p = propellerSpeed(n_p, n_d, P.model);
+    [ui, ui_log, act] = actuatorInputs(delta_r, delta_s, act, P.model, h);
 
     % Physics: ocean current, then the state at t(i+1)
     if ControlFlag == 4
         [Vc, betaVc] = oceanCurrent(t(i), Vc, betaVc, h);
     end
 
-    ui = [delta_r -delta_s n_p]';               % Control input vector
-    simData(i,:) = [ref_k Vc betaVc wc ui' x']; % Store simulation data in a table
+    simData(i,:) = [ref_k Vc betaVc wc ui_log' x']; % Store simulation data in a table
 
     x = physicsStep(x, ui, Vc, betaVc, wc, P.model, h);
 
@@ -289,7 +303,11 @@ xlabel('Time (s)'),title('Rudder command \delta_r (deg)'),grid
 subplot(312),plot(t,rad2deg(ui(:,2)))
 xlabel('Time (s)'),title('Stern-plane command \delta_s (deg)'),grid
 subplot(313),plot(t,ui(:,3))
-xlabel('Time (s)'),title('Propeller speed command n (rpm)'),grid
+if isAUV1
+    xlabel('Time (s)'),title('Stern thruster PWM (\mus)'),grid
+else
+    xlabel('Time (s)'),title('Propeller speed command n (rpm)'),grid
+end
 set(findall(gcf,'type','line'),'linewidth',1.5)
 set(findall(gcf,'type','text'),'FontSize',12)
 
@@ -405,7 +423,8 @@ out.ControlFlag = ControlFlag;
 out.KinematicsFlag = KinematicsFlag;
 out.eta = eta;                          % [x y z phi theta psi], NED (m, rad)
 out.nu = nu;                            % [u v w p q r] (m/s, rad/s)
-out.ui = ui;                            % [delta_r delta_s n] applied (rad, rad, RPM)
+out.ui = ui;                            % [delta_r delta_s n] applied (rad, rad, RPM),
+                                        % stern thruster PWM (us) for AUV1 actuators
 out.ref.z_d = simData(:,1);             % Desired depth (m), ControlFlag 1-3
 out.ref.theta_d = theta_d;              % Desired pitch angle (rad)
 out.ref.psi_d = psi_d;                  % Desired yaw angle (rad)
