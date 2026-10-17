@@ -1,4 +1,4 @@
-function SIMauv1(ControlFlag, KinematicsFlag)
+function simOut = SIMauv1(ControlFlag, KinematicsFlag)
 % This script simulates the Remus 100 Autonomous Underwater Vehicle (AUV)
 % under depth and heading control while exposed to ocean currents. It supports
 % both Euler angle and unit quaternion kinematics representations and features
@@ -13,6 +13,12 @@ function SIMauv1(ControlFlag, KinematicsFlag)
 %   SIMauv1(ControlFlag, KinematicsFlag) : ControlFlag = 1-4 (see dialog),
 %                                          KinematicsFlag = 1 (Euler angles)
 %                                          or 2 (unit quaternions)
+%   simOut = SIMauv1(...)                : Also return the logged results as a
+%                                          struct, e.g. to save the run and
+%                                          replay it later with auv1Visualiser
+%
+% Each run ends by opening its replay (auv1Visualiser), and a new run closes
+% the previous replay along with the other figures.
 %
 % Dependencies:
 %   auv1.m                - Dynamics of the AUV1 vehicle
@@ -22,8 +28,9 @@ function SIMauv1(ControlFlag, KinematicsFlag)
 %   ALOSpsi.m             - 2-D ALOS guidance algorithm for path following
 %   ALOS3D.m              - 3-D ALOS guidance algorithm for path following
 %   LOSobserver.m         - Observer for LOS guidance 
-%   q2euler.m, ssa.m      - Utilities for quaternion to Euler conversion 
+%   q2euler.m, ssa.m      - Utilities for quaternion to Euler conversion
 %                           and angle wrapping
+%   auv1Visualiser.m      - Replay of the run
 %
 % Simulink Models:
 %   demoAUVdepthHeadingControl.slx : Depth and heading control.
@@ -58,6 +65,7 @@ function SIMauv1(ControlFlag, KinematicsFlag)
 
 clear integralSMCheading ALOS3D ALOSpsi; % Clear persistent states
 close all;                               % Close all open figure windows
+delete(findall(0, 'Type', 'figure', 'Tag', 'auv1Visualiser')); % And the last replay
 
 % ==============================================================================
 % SIMULATOR CONFIGURATION
@@ -203,7 +211,11 @@ for i = 1:nTimeSteps
             [~,theta,psi] = q2euler(x(10:13)); % Quaternion to Euler angles
     end
 
-    % Control systems 
+    % References used by the autopilots at t(i). The control laws below
+    % propagate them to t(i+1), so they are logged from here.
+    ref_k = [z_d theta_d psi_d r_d];
+
+    % Control systems
     switch ControlFlag
 
         case {1, 2}  % Gradient-based depth control and heading autopilot
@@ -228,6 +240,7 @@ for i = 1:nTimeSteps
             %
             % Outer-loop depth control residual sigma = 0 implies e_z = 0
             z_d = LP.z_d(z_ref); % LP filtering the depth command
+            ref_k(1) = z_d;      % The filtered command is used at t(i)
 
             sigma = -u * sin(theta) + w * cos(theta) ...
                 + Kp_z * ((zn - z_d) + (1/T_z) * z_int);
@@ -266,7 +279,7 @@ for i = 1:nTimeSteps
             delta_r = sat(delta_r, delta_max);
 
             % 2-D ALOS guidance law
-            [psi_ref,~,~,k_active] = ALOSpsi(xn,yn,Delta_h,gamma_h,h,R_switch,wpt);
+            [psi_ref,y_e,beta_c_hat,k_active] = ALOSpsi(xn,yn,Delta_h,gamma_h,h,R_switch,wpt);
             z_ref = wpt.pos.z(k_active); % Use z-coordinate as depth reference
 
             % Gradient-based depth command (down position)
@@ -285,6 +298,9 @@ for i = 1:nTimeSteps
 
             % Propagate reference model for desired depth (k+1)
             [z_d,zdot_d,a_d] = refModel(z_d,zdot_d,a_d,z_ref,w_max,zeta_d_z,wn_d_z,h,0);
+
+            % Store ALOS data in table (no vertical-track error in 2.5-D)
+            alosData(i,:) = [y_e NaN NaN beta_c_hat];
 
         otherwise % Control flag 4 (3-D ALOS path-following)
             % Heading autopilot using the tail rudder (integral SMC)
@@ -366,7 +382,7 @@ for i = 1:nTimeSteps
    end
 
    % Store simulation data in a table
-   simData(i,:) = [z_d theta_d psi_d r_d Vc betaVc wc ui_log' x'];
+   simData(i,:) = [ref_k Vc betaVc wc ui_log' x'];
 
    if (KinematicsFlag == 1)
        % Euler angles x = [ u v w p q r x y z phi theta psi ]'
@@ -599,6 +615,40 @@ if ControlFlag == 4 % 3-D ALOS
     set(findall(gcf,'type','text'),'FontSize',12)
     set(findall(gcf,'type','legend'),'FontSize',legendSize)
     view(-25, 30);  % view(AZ,EL)
+end
+
+% ==============================================================================
+% SIMULATION OUTPUT AND REPLAY (see auv1Visualiser.m)
+% ==============================================================================
+out.t = t(:);                           % Time (s)
+out.h = h;                              % Sampling time (s)
+out.ControlFlag = ControlFlag;
+out.KinematicsFlag = KinematicsFlag;
+out.eta = eta;                          % [x y z phi theta psi], NED (m, rad)
+out.nu = nu;                            % [u v w p q r] (m/s, rad/s)
+out.ui = ui;                            % [delta_r delta_s n] applied (rad, rad, RPM)
+out.ref.z_d = simData(:,1);             % Desired depth (m), ControlFlag 1-3
+out.ref.theta_d = theta_d;              % Desired pitch angle (rad)
+out.ref.psi_d = psi_d;                  % Desired yaw angle (rad)
+out.ref.r_d = r_d;                      % Desired yaw rate (rad/s)
+out.current.Vc = Vc;                    % Horizontal current speed (m/s)
+out.current.betaVc = betaVc;            % Horizontal current direction (rad)
+out.current.wc = wc;                    % Vertical current speed (m/s)
+out.alos.y_e = y_e;                     % Cross-track error (m), ControlFlag 3-4
+out.alos.z_e = z_e;                     % Vertical-track error (m), ControlFlag 4
+out.alos.alpha_c_hat = alpha_c_hat;
+out.alos.beta_c_hat = beta_c_hat;
+out.wpt = wpt;                          % Waypoints (m), ControlFlag 3-4
+out.P = P;                              % Model, control and guidance parameters
+if nargout > 0; simOut = out; end       % Not shown as ans when not asked for
+
+% Replay of the run. If it fails, the results above are still returned.
+if ~isoctave                            % The replay needs uifigure
+    try
+        auv1Visualiser(out);
+    catch err
+        warning('SIMauv1:replay', 'The replay could not be opened: %s', err.message);
+    end
 end
 
 end % SIMauv1
