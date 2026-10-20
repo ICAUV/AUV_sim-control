@@ -15,6 +15,8 @@ simOut = SIMauv1(4, 2);      % 3-D ALOS with unit quaternions, keep the results
 
 Each run plots the results and opens a 3-D replay (`auv1Visualiser`).
 
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Folders
 
 | Folder | Contents |
