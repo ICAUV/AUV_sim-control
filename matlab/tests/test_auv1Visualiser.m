@@ -9,6 +9,7 @@ function test_auv1Visualiser()
 %     Play/Pause at the selected speed, slider, step buttons, plot clicks,
 %     keys, View, Speed, Vehicle scale, Vert. exag., playing to the end and
 %     replaying, and closing while playing leaves no timer behind
+%   - playback also works when it is called with no output, as SIMauv1 does
 %   - bad input is rejected and a diverged run is cut at its first NaN
 % The runs are synthetic, with the tracking errors computed by the real
 % ALOSpsi and ALOS3D, so no simulation is needed. Runs without a display
@@ -161,6 +162,26 @@ checkPlots(fig, s);
 assert(isempty(tagged(fig, 'activeLeg', false)), 'Waypoints shown for an autopilot run');
 seekTo(fig, 20);
 checkFrame(fig, s, sampleAt(s, 20));
+delete(fig);
+
+% ------------------------------------------------------------------------------
+% Called with no output, as SIMauv1 does: playback must still run. Errors in a
+% timer callback do not throw, so check that the replay time moved.
+% ------------------------------------------------------------------------------
+s = makeRun(1);
+evalc('auv1Visualiser(s)');                 % No output, so no handle to use
+fig = findall(groot, 'Type', 'figure', 'Tag', 'auv1Visualiser');
+assert(isscalar(fig), 'Expected one replay window, found %d', numel(fig));
+play = tagged(fig, 'play');  slider = tagged(fig, 'time');
+pick(tc, fig, 'speed', '5x');
+t0 = slider.Value;
+tc.press(play);
+assert(strcmp(play.Text, 'Pause'), 'Play button did not start playback (no output)');
+pause(1);
+assert(slider.Value > t0, ['Replay time did not move when called with no ' ...
+    'output (timer callback failing?)']);
+tc.press(play);
+assert(strcmp(play.Text, 'Play'), 'Pause button did not stop playback (no output)');
 delete(fig);
 
 % ------------------------------------------------------------------------------

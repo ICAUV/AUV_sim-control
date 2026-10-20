@@ -1,4 +1,4 @@
-function fig = auv1Visualiser(simOut)
+function figOut = auv1Visualiser(simOut)
 % auv1Visualiser(simOut) opens a replay of an SIMauv1 run: a 3-D view of the
 % vehicle, with moving rudders and stern planes, on its path, the waypoints
 % and active leg (ControlFlag 3-4), a readout of the state and time plots.
@@ -283,7 +283,7 @@ tmr = timer('Name', 'auv1Visualiser', 'ExecutionMode', 'fixedSpacing', ...
 fig.DeleteFcn = @(~,~) onDelete();
 
 applyView();   % Also draws the first frame
-if nargout == 0; clear fig; end
+if nargout > 0; figOut = fig; end
 
 % ==============================================================================
 % NESTED FUNCTIONS (share the state above)
