@@ -21,6 +21,13 @@ jobs:
           release: R2025b
           cache: true
 
+      - name: Start virtual display
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          test -e /tmp/.X11-unix/X99
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
       - name: test_auv1_matches_remus100
         uses: matlab-actions/run-command@v2
         with:
