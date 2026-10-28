@@ -29,5 +29,15 @@ Log: `validation_results.txt`.
 
 Log: `validation_results_pass_b.txt`.
 
+## validate_pitch_autopilot.m (pitch PID gains and feedforward)
+
+| Step | Check | Output |
+|---|---|---|
+| 1 | Finite differences of `auv1.m` for `m_th`, `d_th`, `k_th`, `M_delta` at `U0`, against the values in `auv1Params.m` (within 0.5%), `M(5,5)` and `W*BG_z` | console |
+| 2 | `pitchGains.m` on the finite differences against `Kp`, `Kd`, `Ki`, `Kff` in `auv1Params.m` | console |
+| 3 | 10 deg `theta_d` step from trim at `U0`: nonlinear, linearised and ideal second-order response (rise time, overshoot, settling time), no fin saturation or servo slew limit; repeated with the plant `M_delta` scaled by 0.75 and 1.25 and the plant `k_th` scaled by 0.5 and 1.5 (via `r_bG(3)`; `auv1.m` takes the pitch damping from `W*BG_z` too, so `d_th` moves by about the square root of the scale), controller unchanged | `validate_pitch_autopilot.png` |
+
+No text log; the script prints the tables and stops on a failed check.
+
 The files here are from the last time each script was run; the `SIMauv1` step
 used the path in `pathParams.m` at that time.
