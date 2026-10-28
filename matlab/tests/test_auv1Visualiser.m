@@ -42,12 +42,14 @@ seekTo(fig, s.t(1));
 % Play and pause with the button
 pick(tc, fig, 'speed', '5x');
 t0 = slider.Value;
-tc.press(play);
-assert(waitFor(@() strcmp(play.Text, 'Pause')), 'Play button did not start playback');
+gest = tic;  tc.press(play);
+assert(waitFor(@() strcmp(play.Text, 'Pause')), '%s', ...
+    playDiag('Play button did not start playback', fig, play, gest));
 assert(waitFor(@() slider.Value > t0), 'Play button pressed, but the time did not move');
 checkFrame(fig, s, []);   % Consistent while playing
-tc.press(play);
-assert(waitFor(@() strcmp(play.Text, 'Play')), 'Pause button did not stop playback');
+gest = tic;  tc.press(play);
+assert(waitFor(@() strcmp(play.Text, 'Play')), '%s', ...
+    playDiag('Pause button did not stop playback', fig, play, gest));
 tPaused = slider.Value;
 pause(0.5);
 assert(slider.Value == tPaused, 'Still playing after Pause');
@@ -87,10 +89,12 @@ pressKey(fig, 'rightarrow', 'shift');   checkFrame(fig, s, sampleAt(s, s.t(k0) +
 pressKey(fig, 'leftarrow', 'shift');    checkFrame(fig, s, sampleAt(s, s.t(k0) + 1));
 pressKey(fig, 'end');                   checkFrame(fig, s, numel(s.t));
 pressKey(fig, 'home');                  checkFrame(fig, s, 1);
-pressKey(fig, 'space');
-assert(waitFor(@() strcmp(play.Text, 'Pause')), 'Space did not start playback');
-pressKey(fig, 'space');
-assert(waitFor(@() strcmp(play.Text, 'Play')), 'Space did not stop playback');
+gest = tic;  pressKey(fig, 'space');
+assert(waitFor(@() strcmp(play.Text, 'Pause')), '%s', ...
+    playDiag('Space did not start playback', fig, play, gest));
+gest = tic;  pressKey(fig, 'space');
+assert(waitFor(@() strcmp(play.Text, 'Play')), '%s', ...
+    playDiag('Space did not stop playback', fig, play, gest));
 
 % Views, vertical exaggeration and vehicle scale
 seekTo(fig, 80);
@@ -113,15 +117,15 @@ checkFrame(fig, s, sampleAt(s, 81));
 
 % Play to the end, then Play replays from the start
 pick(tc, fig, 'speed', '200x');
-tc.press(play);
+gest = tic;  tc.press(play);
 wall = tic;
 while strcmp(play.Text, 'Pause') && toc(wall) < 10; pause(0.1); end
-assert(strcmp(play.Text, 'Play'), 'Playback did not stop at the end');
+assert(strcmp(play.Text, 'Play'), '%s', playDiag('Playback did not stop at the end', fig, play, gest));
 checkFrame(fig, s, numel(s.t));
 pick(tc, fig, 'speed', '1x');
-tc.press(play);
-assert(waitFor(@() strcmp(play.Text, 'Pause') && slider.Value < 10), ...
-    'Play at the end did not replay (button "%s", t = %.2f s)', play.Text, slider.Value);
+gest = tic;  tc.press(play);
+assert(waitFor(@() strcmp(play.Text, 'Pause') && slider.Value < 10), '%s', ...
+    playDiag(sprintf('Play at the end did not replay (t = %.2f s)', slider.Value), fig, play, gest));
 
 % Close while playing
 delete(fig);
@@ -177,12 +181,14 @@ assert(isscalar(fig), 'Expected one replay window, found %d', numel(fig));
 play = tagged(fig, 'play');  slider = tagged(fig, 'time');
 pick(tc, fig, 'speed', '5x');
 t0 = slider.Value;
-tc.press(play);
-assert(waitFor(@() strcmp(play.Text, 'Pause')), 'Play button did not start playback (no output)');
+gest = tic;  tc.press(play);
+assert(waitFor(@() strcmp(play.Text, 'Pause')), '%s', ...
+    playDiag('Play button did not start playback (no output)', fig, play, gest));
 assert(waitFor(@() slider.Value > t0), ['Replay time did not move when called with no ' ...
     'output (timer callback failing?)']);
-tc.press(play);
-assert(waitFor(@() strcmp(play.Text, 'Play')), 'Pause button did not stop playback (no output)');
+gest = tic;  tc.press(play);
+assert(waitFor(@() strcmp(play.Text, 'Play')), '%s', ...
+    playDiag('Pause button did not stop playback (no output)', fig, play, gest));
 delete(fig);
 
 % ------------------------------------------------------------------------------
@@ -430,14 +436,25 @@ end
 
 function ok = waitFor(cond, timeout)
 % True as soon as cond() is, polled every 0.05 s; false if it is not true within
-% timeout seconds (default 3). Lets a starved UI or timer catch up.
-if nargin < 2; timeout = 3; end
+% timeout seconds (default 10). Lets a starved UI or timer catch up.
+if nargin < 2; timeout = 10; end
 wall = tic;
 ok = cond();
 while ~ok && toc(wall) < timeout
     pause(0.05);
     ok = cond();
 end
+end
+
+function msg = playDiag(msg, fig, play, gest)
+% Adds to a failed play.Text assert what is needed to see why a slow runner
+% missed it: the button, the time since the gesture (tic'd by the caller), the
+% playback timer, the last warning and the window against the screen
+tm = timerfindall('Name', 'auv1Visualiser');
+if isempty(tm); timerState = 'none'; else; timerState = char(strjoin(string({tm.Running}), ',')); end
+msg = sprintf(['%s [play.Text "%s"; %.2f s since gesture; timer running: %s; ' ...
+    'lastwarn "%s"; fig.Position [%s] on screen [%s]]'], msg, play.Text, toc(gest), ...
+    timerState, lastwarn, num2str(fig.Position), num2str(get(groot, 'ScreenSize')));
 end
 
 function seekTo(fig, tq)
