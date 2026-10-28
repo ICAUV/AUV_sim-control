@@ -60,6 +60,8 @@ test_SIMauv1_regression
 test_auv1Visualiser
 ```
 
+CI runs these tests automatically on every pull request.
+
 Rewrite the regression baseline with `test_SIMauv1_regression(true)` only when
 you meant to change the behaviour. Say why in the pull request.
 
