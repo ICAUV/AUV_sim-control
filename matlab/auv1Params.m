@@ -261,13 +261,60 @@ ctrl.zeta_d_z = 1.0;               % Damping ratio, depth reference model (2.5-D
 ctrl.w_max = 3.0;                  % Maximum dive speed (m/s)
 ctrl.theta_max = deg2rad(30.0);    % Maximum pitch angle (rad)
 
-% Pitch controller (PID pole placement using the model mass matrix)
-[~,~,M] = auv1(zeros(12,1), model.ui0, 0, 0, 0, model);
-ctrl.w_theta = 0.8;                % Natural frequency in pitch (rad/s)
+% Pitch controller (PID pole placement, control/pitchGains.m)
 ctrl.zeta_theta = 0.8;             % Relative damping ratio in pitch
-ctrl.Kp_theta = M(5,5) * ctrl.w_theta^2;                   % Proportional gain
-ctrl.Kd_theta = M(5,5) * 2 * ctrl.zeta_theta * ctrl.w_theta; % Derivative gain
-ctrl.Ki_theta = ctrl.Kp_theta * ctrl.w_theta / 10;         % Integral gain
+if strcmpi(vehicle, 'auv1')
+    % Linearised pitch model m_th*theta_dd + d_th*q + k_th*theta = M_delta*delta_s
+    % about level flight at the design speed U0, from central finite
+    % differences of auv1.m (validation/validate_pitch_autopilot.m repeats
+    % them and checks these values). Fins neutral, other states at trim
+    % (w0 = -0.032 m/s, theta0 = 0.02 deg). Re-derive after changing any
+    % P.model value: they are not recomputed here.
+    %
+    % Design speed U0 (m/s) | through-water speed reached by SIMauv1(1,1)
+    % with the stern command act.pwm_stern_cmd = 1700 us, steady from
+    % t = 100 s (2.2487-2.2499 m/s) | ESTIMATE, +-0.01 in the simulator; the
+    % real speed is lower, as the thrust table is bollard data
+    ctrl.U0_theta = 2.25;
+    % Pitch inertia incl. added mass (kg m2) | finite difference, 3.1460;
+    % M(5,5) = 3.1544 (0.3% higher: the finite difference includes the
+    % M(1,5) = m*zg surge coupling) | ESTIMATE, follows m_target (+-20%)
+    ctrl.m_theta = 3.146;
+    % Linear pitch damping (N m s/rad) | finite difference at U0: D(5,5), hull
+    % lift and cross-flow drag. The fins add none, as auv1.m has no local
+    % flow angle at the fins | ESTIMATE, +-0.45 (5.907 with w0 = 0 instead of
+    % the trim value)
+    ctrl.d_theta = 6.350;
+    % Restoring stiffness (N m/rad) | finite difference, 4.356; W*BG_z =
+    % 4.317 (0.9% lower: the finite difference includes dB*sin(theta) in
+    % surge through M(1,5)) | ESTIMATE, follows r_bG (+-0.01 m in z, i.e. +-50%)
+    ctrl.k_theta = 4.356;
+    % Pitch moment per rad of delta_s (N m/rad) | finite difference of the
+    % pitch command -> fin_mixer -> deflection_to_pwm -> auv1.m path at U0,
+    % 15.31 (two fins, rho*U0^2*S_fin*CL_delta_s*|x_fin|) | ESTIMATE, +-25%
+    % (x_fin +-0.05 m is +-11%, CL_delta_s is the REMUS value)
+    ctrl.M_delta_theta = 15.31;
+    % Natural frequency in pitch (rad/s) | design choice. Above both
+    % sqrt(k_th/m_th) = 1.18 rad/s (Kp > 0) and 1.26 rad/s (Kd > 0), and
+    % low enough that a 10 deg step in theta_d stays well inside delta_max
+    % and the servo slew limit (see validation/validate_pitch_autopilot.m)
+    ctrl.w_theta = 2.0;
+    % Restoring-moment feedforward Kff_theta (rad/rad) | k_theta/M_delta_theta,
+    % the stern angle per rad of theta_d that balances the restoring moment
+    % (pitchGains.m) | ESTIMATE, +-56% (k_theta +-50%, M_delta_theta +-25%, in
+    % quadrature)
+    [ctrl.Kp_theta, ctrl.Kd_theta, ctrl.Ki_theta, ctrl.Kff_theta] = pitchGains( ...
+        ctrl.m_theta, ctrl.d_theta, ctrl.k_theta, ctrl.M_delta_theta, ...
+        ctrl.w_theta, ctrl.zeta_theta);
+else
+    % REMUS 100: original MSS gains from the model mass matrix
+    [~,~,M] = auv1(zeros(12,1), model.ui0, 0, 0, 0, model);
+    ctrl.w_theta = 0.8;            % Natural frequency in pitch (rad/s)
+    ctrl.Kp_theta = M(5,5) * ctrl.w_theta^2;                   % Proportional gain
+    ctrl.Kd_theta = M(5,5) * 2 * ctrl.zeta_theta * ctrl.w_theta; % Derivative gain
+    ctrl.Ki_theta = ctrl.Kp_theta * ctrl.w_theta / 10;         % Integral gain
+    ctrl.Kff_theta = 0;            % No restoring-moment feedforward (rad/rad)
+end
 
 % Heading control parameters (using Nomoto model)
 ctrl.K_yaw = 5 / 20;               % Gain, max rate of turn over max. rudder angle
