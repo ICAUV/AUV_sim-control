@@ -1,0 +1,49 @@
+name: MATLAB tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up MATLAB R2025b
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          release: R2025b
+          cache: true
+
+      - name: Start virtual display
+        run: |
+          Xvfb :99 -screen 0 1280x720x24 &
+          for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          test -e /tmp/.X11-unix/X99
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: test_auv1_matches_remus100
+        uses: matlab-actions/run-command@v2
+        with:
+          command: addpath('matlab/tests'); test_auv1_matches_remus100
+
+      - name: test_auv1_actuator_signs
+        uses: matlab-actions/run-command@v2
+        with:
+          command: addpath('matlab/tests'); test_auv1_actuator_signs
+
+      - name: test_SIMauv1_regression
+        uses: matlab-actions/run-command@v2
+        with:
+          command: addpath('matlab/tests'); test_SIMauv1_regression
+
+      - name: test_auv1Visualiser
+        uses: matlab-actions/run-command@v2
+        with:
+          command: addpath('matlab/tests'); test_auv1Visualiser
