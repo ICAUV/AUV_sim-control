@@ -14,8 +14,10 @@ Each test runs `startup_auv1.m` itself, so they can be run from anywhere, e.g.
 
 The baseline stores the path it was made with and the test runs that path,
 so editing `pathParams.m` does not break it. It was last rewritten after
-merging pass B (AUV1 PWM actuators). Before that, the merged code was checked
-bit for bit against the unsplit `SIMauv1.m` of pass B.
+adding the pitch restoring-moment feedforward `Kff_theta` to the AUV1 pitch
+autopilot (after the pitch gains were redesigned in `control/pitchGains.m`).
+Before that, the merged code of pass B (AUV1 PWM actuators) was checked bit
+for bit against the unsplit `SIMauv1.m`.
 
 After an intended change in behaviour, rewrite it with the current
 `pathParams()`:

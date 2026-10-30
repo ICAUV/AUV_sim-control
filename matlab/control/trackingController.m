@@ -3,12 +3,13 @@ function [delta_r, delta_s] = trackingController(y, ref, theta_int, ControlFlag,
 % delta_max, h) is the inner loop: the fin angles that track the desired
 % pitch and heading in ref.
 %
-%   delta_s : Stern planes, pitch PID with integral state theta_int
+%   delta_s : Stern planes, pitch PID with integral state theta_int and the
+%             feedforward Kff_theta*theta_d against the restoring moment
 %   delta_r : Tail rudder, integral SMC heading autopilot. ControlFlag 1 uses
 %             the PID gains, 2-4 the SMC gains; 3-4 use the ALOS modes.
 
-% Depth autopilot using the stern planes (PID)
-delta_s = -ctrl.Kp_theta * ssa(y.theta - ref.theta_d) ...
+% Depth autopilot using the stern planes (PID with restoring-moment feedforward)
+delta_s = ctrl.Kff_theta * ref.theta_d - ctrl.Kp_theta * ssa(y.theta - ref.theta_d) ...
     - ctrl.Kd_theta * y.q - ctrl.Ki_theta * theta_int;
 delta_s = sat(delta_s, delta_max);
 

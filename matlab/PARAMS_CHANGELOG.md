@@ -68,3 +68,66 @@ Known gaps of the AUV1 actuator model (also in the `auv1.m` header): the thrust
 is bollard data with no loss with forward speed (overpredicts at speed), no
 thrust deduction, no propeller torque in roll, no fin stall, no local flow
 angle at the fins.
+
+## Pitch autopilot gains (2026-10-27)
+
+The gains were `M(5,5)*w^2` and `M(5,5)*2*zeta*w`, in torque units, while
+`trackingController.m` outputs `delta_s` in rad. They now come from
+`control/pitchGains.m`, pole placement on the linearised pitch model
+`m_th*theta_dd + d_th*q + k_th*theta = M_delta*delta_s` at one design speed
+`U0`. The four model terms are central finite differences of `auv1.m` about level
+flight at `U0` (fins neutral, other states at trim), repeated and checked by
+`validation/validate_pitch_autopilot.m`. They are not recomputed in
+`auv1Params.m`: after changing any `P.model` value, redo them. The REMUS 100
+set keeps the old gains.
+
+| Date | Parameter | Old → New | Unit | Source | Uncertainty | Reason |
+|------|-----------|-----------|------|--------|-------------|--------|
+| 2026-10-27 | `U0_theta` (new) | – → 2.25 | m/s | Through-water speed of `SIMauv1(1,1)` with the stern command 1700 us, steady from t = 100 s (2.2487–2.2499) | ESTIMATE, ±0.01 in the simulator. Real speed is lower: bollard thrust table | Single design speed of the pitch gains |
+| 2026-10-27 | `m_theta` (new) | – → 3.146 | kg m² | Finite difference of `auv1.m`; `M(5,5)` = 3.1544 (finite difference −0.27%: surge coupling `M(1,5)` = m·zg) | ESTIMATE, follows `m_target` (±20%) | Pitch inertia incl. added mass |
+| 2026-10-27 | `d_theta` (new) | – → 6.350 | N m s/rad | Finite difference of `auv1.m` at `U0`: `D(5,5)`, hull lift, cross-flow drag. Fins add none (no local flow angle at the fins in `auv1.m`) | ESTIMATE, ±0.45 (5.907 with w0 = 0 instead of the trim value) | Linear pitch damping |
+| 2026-10-27 | `k_theta` (new) | – → 4.356 | N m/rad | Finite difference of `auv1.m`; `W*BG_z` = 4.317 (finite difference +0.9%: `dB*sin(theta)` in surge through `M(1,5)`) | ESTIMATE, follows `r_bG` (±0.01 m in z, i.e. ±50%) | Restoring stiffness |
+| 2026-10-27 | `M_delta_theta` (new) | – → 15.31 | N m/rad of `delta_s` | Finite difference of pitch command → `fin_mixer` → `deflection_to_pwm` → `auv1.m` at `U0`; sign checked against `test_auv1_actuator_signs.m` | ESTIMATE, ±25% (`x_fin` ±0.05 m is ±11%, `CL_delta_s` is the REMUS value) | Pitch moment per rad of `delta_s`; scales with `U0²` |
+| 2026-10-27 | `w_theta` | 0.8 → 2.0 | rad/s | Design choice | – | Above 1.18 rad/s (`Kp` > 0) and 1.26 rad/s (`Kd` > 0). A 10° step in `theta_d` gives a peak `delta_s` of 5.4° (22% of `delta_max`, 5.4° of 15° per sample servo slew); a 30° step (`theta_max`) gives 16° |
+| 2026-10-27 | `zeta_theta` | 0.8 → 0.8 (unchanged) | – | Design choice | – | Kept near 0.8 |
+| 2026-10-27 | `Kp_theta` | 2.0188 → 0.5374 | rad/rad | `pitchGains.m`: (m_th·w² − k_th)/M_delta | follows the model terms | Old value had torque units, no restoring stiffness or fin effectiveness |
+| 2026-10-27 | `Kd_theta` | 4.0376 → 0.2428 | rad/(rad/s) | `pitchGains.m`: (2·zeta·w·m_th − d_th)/M_delta | follows the model terms | As for `Kp_theta`. Old value was 16 times too large |
+| 2026-10-27 | `Ki_theta` | 0.1615 → 0.1075 | rad/(rad s) | `pitchGains.m`: Kp·w/10 | follows `Kp_theta` | Same rule as before, new `Kp` and `w` |
+
+Effect on the step response (`validate_pitch_autopilot.m`, 10° `theta_d` step at
+`U0`): 10–90% rise time 6.8 s, no overshoot, 2% settling time 18 s, against 1.2 s,
+1.5% and 1.9 s for the ideal second order system with `w` and `zeta`. The
+proportional and derivative terms alone reach `1 − k_th/(m_th·w²)` = 65% of the
+step and `Ki = Kp·w/10` supplies the rest through a slow pole at −0.15 rad/s.
+
+Regression baseline `tests/reference/SIMauv1_baseline.mat` rewritten: depth
+differs by at most 0.65 m and pitch by at most 2.65° from the old gains in the
+8 runs (largest in ControlFlag 1-2), no change in stability or oscillation.
+
+## Pitch restoring-moment feedforward (2026-10-28)
+
+With `k_th` > 0 the pitch PD alone reaches only `1 − k_th/(m_th·w²)` = 65% of a
+`theta_d` step and the integral cleared the rest slowly. `trackingController.m`
+now adds `Kff_theta*theta_d` to `delta_s`, with `Kff_theta = k_th/M_delta`
+from `control/pitchGains.m` (fourth output). The poles do not change. `Ki`
+stays `Kp·w/10`. The REMUS 100 set has `Kff_theta = 0`, so its behaviour is
+unchanged.
+
+| Date | Parameter | Old → New | Unit | Source | Uncertainty | Reason |
+|------|-----------|-----------|------|--------|-------------|--------|
+| 2026-10-28 | `Kff_theta` (new) | – → 0.2845 | rad/rad | `pitchGains.m`: k_th/M_delta = 4.356/15.31 | ESTIMATE, ±56% (`k_theta` ±50%, `M_delta_theta` ±25%, in quadrature) | Stern angle that balances the restoring moment at `theta_d` |
+
+Effect on the 10° `theta_d` step at `U0` (`validate_pitch_autopilot.m`,
+nonlinear simulation): 10–90% rise time 6.8 s → 1.1 s, overshoot 0% → 11%,
+2% settling time 18.3 s → 13.6 s; peak `delta_s` 5.4° → 8.2° (33% of
+`delta_max`, 8.2° of 15° per sample servo slew). The overshoot comes from the
+integral term. With the plant `M_delta` at 0.75 and 1.25 times the stored value
+and the controller unchanged: overshoot 2.2% and 17.2%, 2% settling time 4.3 s
+and 17.5 s.
+
+Regression baseline `tests/reference/SIMauv1_baseline.mat` rewritten: against
+the previous baseline depth differs by at most 1.83 m and pitch by at most 6.7°
+(ControlFlag 1-2, which reach the `theta_max` limit), 0.16 m and 0.71° in
+ControlFlag 3, 0.94 m and 3.3° in ControlFlag 4. `alpha_c_hat` in ControlFlag 4
+changes by +0.009° at its maximum and +0.0003° at the end. No depth response
+became oscillatory or unstable.

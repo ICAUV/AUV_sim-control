@@ -10,14 +10,67 @@ the four fins in `actuatorInputs.m`.
 
 `[delta_r, delta_s] = trackingController(y, ref, theta_int, ControlFlag, ctrl, delta_max, h)`
 
-Stern planes, pitch PID:
+Stern planes, pitch PID with restoring-moment feedforward:
 
 ```
-delta_s = -Kp_theta * ssa(theta - theta_d) - Kd_theta * q - Ki_theta * theta_int
+delta_s = Kff_theta * theta_d - Kp_theta * ssa(theta - theta_d) - Kd_theta * q - Ki_theta * theta_int
 ```
 
-The gains come from pole placement on the pitch inertia `M(5,5)` with
-`w_theta` and `zeta_theta` (theory Ch 15.3).
+`delta_s` is in rad, so the gains are rad per rad, rad per rad/s and rad per
+rad s. They come from `pitchGains.m`, pole placement (theory Ch 15.2-15.3) on
+the linearised pitch model at one design speed `U0`:
+
+```
+m_th * theta_dd + d_th * q + k_th * theta = M_delta * delta_s
+Kp  = (m_th*w^2 - k_th) / M_delta
+Kd  = (2*zeta*w*m_th - d_th) / M_delta
+Ki  = Kp * w / 10
+Kff = k_th / M_delta
+```
+
+`Kff_theta` is the stern angle whose moment balances the restoring moment at
+`theta_d`. Without it the proportional term has to hold the restoring moment
+with a pitch error. `auv1Params('remus100')` sets `Kff_theta = 0`.
+
+| Term | AUV1 value | Meaning |
+|---|---|---|
+| `U0_theta` | 2.25 m/s | Through-water speed `SIMauv1(1,1)` reaches with the stern command (1700 us) |
+| `m_theta` | 3.146 kg m2 | Pitch inertia incl. added mass (`M(5,5)` = 3.154) |
+| `d_theta` | 6.350 N m s/rad | Linear pitch damping at `U0` (hull; the fins add none in `auv1.m`) |
+| `k_theta` | 4.356 N m/rad | Restoring stiffness (`W*BG_z` = 4.317) |
+| `M_delta_theta` | 15.31 N m/rad | Pitch moment per rad of `delta_s` at `U0` |
+
+The four values are central finite differences of `auv1.m` about level flight at
+`U0` (fins neutral, other states at trim). They are stored in `auv1Params.m`,
+not recomputed, so redo them after changing `P.model`:
+`validation/validate_pitch_autopilot.m` repeats the differences and stops if the
+stored values are out of date. `M_delta` scales with `U0^2`, so the gains hold
+at `U0` only. `auv1Params('remus100')` keeps the original gains from `M(5,5)`.
+
+`w_theta` = 2.0 rad/s, `zeta_theta` = 0.8 give `Kp` = 0.537, `Kd` = 0.243,
+`Ki` = 0.108, `Kff` = 0.284 (before: 2.019, 4.038, 0.162, none). The hull alone
+has 1.18 rad/s and `zeta` = 0.86, so `Kp` and `Kd` are positive only above
+`w` = 1.26 rad/s. A 10 deg step in `theta_d` takes `delta_s` to 8.2 deg (33% of
+`delta_max`, a change of 8.2 deg per sample against the 15 deg per sample servo
+slew limit): 5.4 deg from `Kp` and 2.8 deg from `Kff`. A step of `theta_max`
+(30 deg) asks for 24.7 deg, just inside `delta_max` and above the slew limit.
+Peak pitch rate 8.9 deg/s.
+
+The feedforward does not move the poles (`-1.53 +- 1.10j`, `w` = 1.88 rad/s,
+`zeta` = 0.81, and `-0.15` rad/s from `Ki`). It gives the proportional and
+feedforward terms together a DC gain of 1. Without it they reached only
+`1 - k_th/(m_th*w^2)` = 65% of the step and the integral cleared the rest
+slowly (2% settling time 18.3 s). Step response in the nonlinear simulation now:
+10-90% rise time 1.1 s, 11% overshoot, 2% settling time 13.6 s (ideal second
+order: 1.2 s, 1.5%, 1.9 s). The overshoot comes from the integral, which
+collects error while the pitch rises and then needs time to unwind.
+
+`Kff` is only as good as `M_delta`, which is an ESTIMATE (+-25%). With the plant
+`M_delta` at 0.75 and 1.25 times the stored value and the controller unchanged,
+the proportional and feedforward terms alone would settle at 89.7% and 107.4% of
+the step, and the integral has to clear that. In the nonlinear simulation:
+overshoot 2.2% and 17.2%, 2% settling time 4.3 s and 17.5 s
+(`validation/validate_pitch_autopilot.m`).
 
 Rudder, integral sliding mode heading autopilot `integralSMCheading` on a
 first-order Nomoto model (`K_yaw`, `T_yaw`), tracking `psi_d`, `r_d`, `a_d`:
